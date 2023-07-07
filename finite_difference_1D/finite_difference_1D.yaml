@@ -1,0 +1,16 @@
+hasegawa_wakatani_finite_difference_1D:
+    grid_size: 682
+    domain: 50
+    tf: 500
+    atol: 1.0e-10
+    rtol: 1.0e-10
+    νx: 1.0e-2
+    νy: 1.0e-4
+    # νz: 1.0e-5
+    Dx: 1.0e-4
+    Dy: 1.0e-4
+    acc: 6
+    # Dz: 1.0e-5
+    # boundary: dirichlet
+    video_length: 10
+    video_fps: 20

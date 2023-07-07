@@ -1,0 +1,13 @@
+hasegawa_wakatani_spectral_2D:
+  grid_size: 1024
+  domain: 50
+  atol: 1.0e-4
+  rtol: 1.0e-4
+  νx: 1.0e-4
+  νy: 1.0e-4
+  νz: 1.0e-5
+  Dx: 1.0e-4
+  Dx: 1.0e-4
+  Dz: 1.0e-5
+  tf: 500
+  video_length: 20

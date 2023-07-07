@@ -1,0 +1,12 @@
+numpy
+matplotlib
+xarray
+yaml
+tqdm
+scipy
+findiff
+h5netcdf
+
+jax
+diffrax
+jax_cfd
