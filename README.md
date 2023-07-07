@@ -50,3 +50,4 @@ $$\frac{\partial \overline{\Omega}}{\partial t} = 2 k_y \frac{\partial }{\partia
 
 # Credits
 - [Ozgur Gurcan](https://gurcani.github.io)'s [repo](https://github.com/gurcani/hwak_cuda)
+- [Pierre Morel](https://www.lpp.polytechnique.fr/-Pierre-Morel)
