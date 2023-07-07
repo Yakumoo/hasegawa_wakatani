@@ -1,4 +1,7 @@
 # Hasegawa-Wakatani turbulence simulations with Jax
+https://github.com/Yakumoo/hasegawa_wakatani/assets/26108275/dfd353bb-03be-4cfd-a015-f0cbbfbf9cbd
+
+
 
 # Usage
 1. Create your `.yaml` file with the model and the parameters. For example:
@@ -39,6 +42,7 @@ $$\frac{\partial\Delta^2{\phi}}{\partial t} = -[\phi, \Delta^2\phi] + C (\tilde{
 ## Fourier space
 $$\frac{\partial \phi_k}{\partial t} = - \frac{C_k}{k^2} (\phi_k -n_k) - ν_k\phi_k + \frac{1}{k^2} [\phi, \Delta{\phi}]_k \qquad \frac{\partial n_k}{\partial t} = C_k (\phi_k -n_k) - i \kappa k_y \phi_k -D_kn_k - [\phi,n]_k$$
 ## Single poloïdal mode
-$$\frac{\partial \Omega_k}{\partial t} = - ik_y \left(\Omega_k \frac{\partial \overline{\phi}}{\partial x} - \phi_k\frac{\partial \overline{\Omega}}{\partial x}\right) - C\left(\phi_k - n_k\right) + ν_x \frac{\partial ^2\Omega_k}{\partial x^2} - ν_y k^2 \Omega_k \qquad \frac{\partial n_k}{\partial t} = - ik_y \left(\Omega_k \frac{\partial \overline{\phi}}{\partial x} + \left(\kappa-\frac{\partial \overline{n}}{\partial x}\right)\phi_k\right) - C\left(\phi_k - n_k\right) + D_x \frac{\partial ^2n_k}{\partial x^2} - D_y k^2 n_k$$
+$$\frac{\partial \Omega_k}{\partial t} = ik_y \left(\phi_k\frac{\partial \overline{\Omega}}{\partial x} - \Omega_k \frac{\partial \overline{\phi}}{\partial x} \right) + C\left(\phi_k - n_k\right) + ν_x \frac{\partial ^2\Omega_k}{\partial x^2} - ν_y k^2 \Omega_k \qquad \frac{\partial n_k}{\partial t} = ik_y \left( \left(\frac{\partial \overline{n}}{\partial x} - \kappa\right)\phi_k - \Omega_k \frac{\partial \overline{\phi}}{\partial x}\right) + C\left(\phi_k - n_k\right) + D_x \frac{\partial ^2n_k}{\partial x^2} - D_y k^2 n_k$$
+
 $$\frac{\partial \overline{\Omega}}{\partial t} = 2 k_y \frac{\partial }{\partial x} \mathrm{Im}\{\phi_k^* \Omega_k\} - \nu_z\overline{\Omega} \qquad \frac{\partial \overline{n}}{\partial t} = 2 k_y \frac{\partial }{\partial x} \mathrm{Im}\{\phi_k^* n_k\} + D_z\overline{n}$$
 
