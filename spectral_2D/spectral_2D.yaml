@@ -1,8 +1,8 @@
 hasegawa_wakatani_spectral_2D:
   grid_size: 1024
   domain: 50
-  atol: 1.0e-4
-  rtol: 1.0e-4
+  atol: 1.0e-6
+  rtol: 1.0e-6
   νx: 1.0e-4
   νy: 1.0e-4
   νz: 1.0e-5

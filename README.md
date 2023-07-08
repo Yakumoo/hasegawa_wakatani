@@ -1,4 +1,4 @@
-# Hasegawa-Wakatani turbulence simulations with Jax
+# Hasegawa-Wakatani turbulence simulations with [Jax](https://jax.readthedocs.io)
 https://github.com/Yakumoo/hasegawa_wakatani/assets/26108275/dfd353bb-03be-4cfd-a015-f0cbbfbf9cbd
 
 
@@ -32,8 +32,8 @@ python main.py path_to_nc_file.nc --tf 1000
 # Available models
 - `hasegawa_wakatani_spectral_2D`: Pseudo-spectral method in 2D (periodic)
 - `hasegawa_wakatani_spectral_1D`: Pseudo-spectral method with a single poloïdal mode, it uses `hasegawa_wakatani_spectral_2D`
-- `hasegawa_wakatani_finite_difference_2D`: Finite-difference method in 2D (periodic, Dirichlet, Neumann, force)
-- `hasegawa_wakatani_finite_difference_1D`: Finite-difference method with a single poloïdal mode
+- `hasegawa_wakatani_finite_difference_2D`: Finite-difference method in 2D (periodic, Dirichlet, Neumann)
+- `hasegawa_wakatani_finite_difference_1D`: Finite-difference method with a single poloïdal mode (and forcing)
 
 
 # Equations

@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+
+# yapf main.py -i --style='{DEDENT_CLOSING_BRACKETS = true, COALESCE_BRACKETS = true, ARITHMETIC_PRECEDENCE_INDICATION = true, SPLIT_ALL_TOP_LEVEL_COMMA_SEPARATED_VALUES = true, SPLIT_BEFORE_ARITHMETIC_OPERATOR = true, SPLIT_BEFORE_DOT = true, SPLIT_BEFORE_EXPRESSION_AFTER_OPENING_PAREN = true, SPLIT_BEFORE_FIRST_ARGUMENT = true}'
+
 from inspect import signature
 from pathlib import Path
 from datetime import timedelta
@@ -53,8 +57,8 @@ from diffrax import (
 def brick_wall_filter_2d(grid: grids.Grid):
     """Implements the 2/3 rule."""
     npx, npy = grid.shape
-    nx, ny = npx // 3, npy // 3 + 1
-    filter_ = jnp.zeros((npx, npy // 2 + 1))
+    nx, ny = npx // 3, npy//3 + 1
+    filter_ = jnp.zeros((npx, npy//2 + 1))
     filter_ = filter_.at[:nx, :ny].set(1)
     filter_ = filter_.at[-nx:, :ny].set(1)
 
@@ -93,7 +97,7 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
         self.ksq_div = self.ksq.at[0, 0].set(1)  # use this one for division
 
         npx, npy = self.grid.shape
-        self.nx, self.ny = int(npx / 3) * 2, npy // 3 + 1
+        self.nx, self.ny = int(npx / 3) * 2, npy//3 + 1
         self.filter_ = brick_wall_filter_2d(self.grid)
         self.mask = self.filter_.astype(bool)
 
@@ -102,41 +106,33 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
 
         self.linear_term = jnp.empty((*self.ksq.shape, 2, 2), dtype=complex)
         self.linear_term = (
-            self.linear_term.at[:, :, 0, 0]
-            .set(-self.C / self.ksq_div - self.νx * self.kx2 - self.νy * self.ky2)
-            .at[:, :, 0, 1]
-            .set(self.C / self.ksq_div)
-            .at[:, :, 1, 0]
-            .set(-1j * self.ky * self.κ + self.C)
-            .at[:, :, 1, 1]
-            .set(-self.C - self.Dx * self.kx2 - self.Dy * self.ky2)
+            self.linear_term.at[:, :, 0, 0].set(
+                -self.C / self.ksq_div - self.νx * self.kx2
+                - self.νy * self.ky2
+            )
+            .at[:, :, 0, 1].set(self.C / self.ksq_div)
+            .at[:, :, 1, 0].set(-1j * self.ky * self.κ + self.C)
+            .at[:, :, 1, 1].set(-self.C - self.Dx * self.kx2 - self.Dy * self.ky2)
             # zonal flows
-            .at[:, 0, 0, 0]
-            .set(-self.νz * self.ksq[:, 0])
-            .at[:, 0, 0, 1]
-            .set(0)
-            .at[:, 0, 1, 0]
-            .set(0)
-            .at[:, 0, 1, 1]
-            .set(-self.Dz * self.ksq[:, 0])
-        )
+            .at[:, 0, 0, 0].set(-self.νz * self.ksq[:, 0])
+            .at[:, 0, 0, 1].set(0)
+            .at[:, 0, 1, 0].set(0)
+            .at[:, 0, 1, 1].set(-self.Dz * self.ksq[:, 0])
+        ) # yapf: disable
         self.linear_term = make_hermitian(self.linear_term)
 
     def explicit_terms(self, ŷ):
         φh, nh = jnp.moveaxis(ŷ.view(dtype=complex), -1, 0)
 
         dφdx, dφdy, dndx, dndy, dωdx, dωdy = jnp.fft.irfft2(
-            1j
-            * jnp.array(
-                [
-                    self.kx * φh,
-                    self.ky * φh,
-                    self.kx * nh,
-                    self.ky * nh,
-                    -self.kx * self.ksq * φh,
-                    -self.ky * self.ksq * φh,
-                ]
-            ),
+            1j * jnp.array([
+                self.kx * φh,
+                self.ky * φh,
+                self.kx * nh,
+                self.ky * nh,
+                -self.kx * self.ksq * φh,
+                -self.ky * self.ksq * φh,
+            ]),
             axes=(1, 2),
         )
 
@@ -165,8 +161,8 @@ def make_hermitian(a):
     arg: a: complex array of shape (..., kx, ky)
     """
     x, y = a.shape[:2]
-    b = a.at[: x // 2 : -1, 0].set(jnp.conj(a[1 : x // 2, 0]))
-    b = b.at[x // 2 + 1, :].set(0)
+    b = a.at[:x // 2:-1, 0].set(jnp.conj(a[1:x // 2, 0]))
+    b = b.at[x//2 + 1, :].set(0)
     b = b.at[:, -1].set(0)
     b = b.at[0, 0].set(0)
     return b
@@ -174,9 +170,8 @@ def make_hermitian(a):
 
 class SolverWrapTqdm(AbstractWrappedSolver):
     tqdm_bar: tqdm.auto.tqdm
-    dt: Union[
-        int, float
-    ] = 1  # controls the simulation time interval for updating tqdm_bar
+    # controls the simulation time interval for updating tqdm_bar
+    dt: Union[int, float] = 1
     nonlinear_solver: AbstractNonlinearSolver = None  # for implicit solvers
 
     @property
@@ -212,7 +207,8 @@ class SolverWrapTqdm(AbstractWrappedSolver):
         last_t = jax.lax.cond(
             t1 > last_t + self.dt,
             lambda: host_callback.id_tap(
-                lambda t, transform: self.tqdm_bar.update(
+                lambda t,
+                transform: self.tqdm_bar.update(
                     t  # self.tqdm_bar.total - self.tqdm_bar.n
                     # if self.tqdm_bar.n + t > self.tqdm_bar.total else t
                 ),
@@ -236,21 +232,24 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
 
     term_structure = (AbstractTerm, AbstractTerm, AbstractTerm)
     interpolation_cls = diffrax.LocalLinearInterpolation
-    alphas = jnp.array(
-        [0, 0.1496590219993, 0.3704009573644, 0.6222557631345, 0.9582821306748, 1]
-    )
-    betas = jnp.array(
-        [0, -0.4178904745, -1.192151694643, -1.697784692471, -1.514183444257]
-    )
-    gammas = jnp.array(
-        [
-            0.1496590219993,
-            0.3792103129999,
-            0.8229550293869,
-            0.6994504559488,
-            0.1530572479681,
-        ]
-    )
+    alphas = jnp.array([
+        0,
+        0.1496590219993,
+        0.3704009573644,
+        0.6222557631345,
+        0.9582821306748,
+        1
+    ])
+    betas = jnp.array([
+        0, -0.4178904745, -1.192151694643, -1.697784692471, -1.514183444257
+    ])
+    gammas = jnp.array([
+        0.1496590219993,
+        0.3792103129999,
+        0.8229550293869,
+        0.6994504559488,
+        0.1530572479681,
+    ])
 
     def init(self, terms, t0, t1, y0, args):
         self.μdt = jnp.diff(self.alphas) / 2  # precompute the diff
@@ -284,7 +283,7 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
         h = ex0
         μ = dt * μdt[0]  # (α[1] - α[0]) / 2
         y1 = term_solve.vf(
-            t0 + α[1] * dt, y0 + γ[0] * dt * h + μ * im0, μ
+            t0 + α[1] * dt, y0 + γ[0] * dt * h + μ*im0, μ
         )  # parse time_step as args
 
         # loop from 1
@@ -293,10 +292,12 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
             h = term_ex.vf(tk, y1, args) + β[k] * h
             μ = dt * μdt[k]  # (α[k+1] - α[k]) / 2
             y1 = term_solve.vf(
-                t0 + α[k + 1] * dt, y1 + γ[k] * dt * h + μ * term_im.vf(tk, y1, args), μ
+                t0 + α[k + 1] * dt,
+                y1 + γ[k] * dt * h + μ * term_im.vf(tk, y1, args),
+                μ
             )
 
-        euler_y1 = y0 + dt * (ex0 + im0)
+        euler_y1 = y0 + dt * (ex0+im0)
         y_error = y1 - euler_y1
         dense_info = dict(y0=y0, y1=y1)
         return y1, y_error, dense_info, None, diffrax.RESULTS.successful
@@ -388,19 +389,17 @@ def hasegawa_wakatani_spectral_2D(
     def step(t, y, args=None):
         return m.explicit_terms(y) + m.implicit_terms(y)
 
-    terms = (
-        (
-            ODETerm(lambda t, y, args: m.explicit_terms(y)),
-            ODETerm(lambda t, y, args: m.implicit_terms(y)),
-            ODETerm(lambda t, y, dt: m.implicit_solve(y, dt)),
-        )
-        if solver == "CrankNicolsonRK4"
-        else ODETerm(step)
-    )
+    terms = ((
+        ODETerm(lambda t, y, args: m.explicit_terms(y)),
+        ODETerm(lambda t, y, args: m.implicit_terms(y)),
+        ODETerm(lambda t, y, dt: m.implicit_solve(y, dt)),
+    ) if solver == "CrankNicolsonRK4" else ODETerm(step))
 
     def to_direct_space(yh):
         # move to cpu to handle large data
-        y = jax.device_put(yh, device=jax.devices("cpu")[0]).view(dtype=complex)
+        y = jax.device_put(
+            yh, device=jax.devices("cpu")[0]
+        ).view(dtype=complex)
         y = y[:, m.mask].reshape(-1, m.nx, m.ny, 2)  # unpad
         y = jnp.fft.irfft2(y, axes=(1, 2))
         return y
@@ -475,10 +474,9 @@ def animation_2D(x, fields=["Ω", "n"]):
     tf = da.coords["time"].values[-1]
 
     fig, axes = plt.subplots(1, len(fields), figsize=(10, 5))
-    axes = [*axes]
     images = [
-        ax.imshow(da.sel(time=0, field=field), rasterized=True)
-        for field, ax in zip(fields, axes)
+        ax.imshow(da.sel(time=0, field=field), rasterized=True) for field,
+        ax in zip(fields, axes)
     ]
     for image, field, ax in zip(images, fields, axes):
         image.set(cmap="seismic")
@@ -493,7 +491,9 @@ def animation_2D(x, fields=["Ω", "n"]):
     )
     colorbar.formatter.set_powerlimits((0.1, 10))
     fig.tight_layout()
-    args = {"vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()}
+    args = {
+        "vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()
+    }
 
     def init():
         return images
@@ -501,12 +501,12 @@ def animation_2D(x, fields=["Ω", "n"]):
     def update(frame, args):
         y = da.isel(time=frame)
         vmax = jnp.abs(jnp.array(y.sel(field=fields))).max()
-        vmax = 0.3 * vmax + 0.7 * args["vmax_last"]
+        vmax = 0.3*vmax + 0.7 * args["vmax_last"]
         args["vmax_last"] = vmax
         for image, field, ax in zip(images, fields, axes):
             image.set(data=y.sel(field=field).transpose(), clim=(-vmax, vmax))
         colorbar.update_normal(image.colorbar.mappable)
-        tqdm_bar.update(1)
+        pbar.update(1)
         text_time.set_text(f"Time={frame / video_nframes * tf:.3f}")
         return images
 
@@ -519,14 +519,22 @@ def animation_2D(x, fields=["Ω", "n"]):
         blit=True,
     )
 
+    tqdm_kwargs = {
+        "iterable": range(video_nframes),
+        "desc": "Animation",
+    }
     if isinstance(x, xr.DataArray):
         plt.close()
-        with tqdm.auto.tqdm(range(video_nframes), desc="Animation") as tqdm_bar:
+        with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
             a = ani.to_html5_video(embed_limit=100)
         return HTML(a)
     else:
-        with tqdm.auto.tqdm(range(video_nframes), desc="Animation") as tqdm_bar:
-            ani.save(Path(x).with_suffix(".mp4"), writer=FFMpegWriter(fps=video_fps))
+
+        with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
+            ani.save(
+                Path(x).with_suffix(".mp4"),
+                writer=FFMpegWriter(fps=video_fps)
+            )
         fig.savefig(Path(x).with_name("last_frame.pdf"), dpi=100)
 
 
@@ -545,9 +553,9 @@ def plot_time_frames_2D(filename, frames=[0, 0.25, 0.5, 1]):
             "vmax": vmax,
             "extent": (0, lx, 0, ly),
         }
-        img = ax[0, i].imshow(y.sel(field="Ω").T, **imshow_kwargs)  # vortitcity
+        img = ax[0, i].imshow(y.sel(field="Ω").T, **imshow_kwargs)
         ax[0, i].set(title=f"$\Omega \ t={t:.1f}$", xticks=[], yticks=[])
-        ax[1, i].imshow(y.sel(field="n").T, **imshow_kwargs)  # density
+        ax[1, i].imshow(y.sel(field="n").T, **imshow_kwargs)
         ax[1, i].set(title="$n$", xticks=[], yticks=[])
         fig.colorbar(
             img,
@@ -567,7 +575,8 @@ def plot_time_frames_2D(filename, frames=[0, 0.25, 0.5, 1]):
 
 
 def plot_spectrum(filenames, n_last_frames=100):
-    filenames_ = filenames if isinstance(filenames, (list, tuple)) else [filenames]
+    filenames_ = filenames if isinstance(filenames,
+                                         (list, tuple)) else [filenames]
     fig, ax = plt.subplots(figsize=(4, 3))
     for i, filename in enumerate(filenames_):
         da = open_spectral_with_vorticity(filename)
@@ -582,8 +591,10 @@ def plot_spectrum(filenames, n_last_frames=100):
         y = -jnp.fft.rfft2(jnp.array(y), norm="forward") / k2.at[0, 0].set(1)
         y = k2 * jnp.square(jnp.abs(y)).mean(0) / 2
         y = jax.vmap(
-            lambda j: jnp.where((kn[j] - dk < k) & (k < kn[j] + dk), y, 0).sum()
-        )(jnp.arange(kn.size))
+            fun=lambda j: jnp.where(
+                condition=(kn[j] - dk < k) &(k < kn[j] + dk), x=y, y=0
+            ).sum()
+        )(jnp.arange(kn.size)) # yapf: disable
         # En = jnp.array([Ek[(kn[j] - dk < k) & (k < kn[j] + dk)].sum() for j in range(kn.size)])
         ax.loglog(kn, y, label=f"{Path(filename).stem}")
     ax.set(
@@ -594,17 +605,18 @@ def plot_spectrum(filenames, n_last_frames=100):
     ax.legend()
     fig.tight_layout()
     fig.savefig(
-        Path(filename).with_name("spectrum.pdf"), bbox_inches="tight", pad_inches=0
+        Path(filename).with_name("spectrum.pdf"),
+        bbox_inches="tight",
+        pad_inches=0
     )
-    exit()
 
 
 def hasegawa_wakatani_spectral_1D(
     tf=300,
     grid_size=1024,
     domain=16 * jnp.pi,
-    video_length=10.0,  # seconds
-    video_fps=20,  # fps
+    video_length=10.0,
+    video_fps=20,
     atol=1e-10,
     rtol=1e-10,
     C=1,
@@ -623,8 +635,8 @@ def hasegawa_wakatani_spectral_1D(
         tf=tf,
         grid_size=(grid_size, 6),
         domain=(domain, 2 * jnp.pi / find_ky(C=C, D=Dy, κ=κ, ν=νy)),
-        video_length=video_length,  # seconds
-        video_fps=video_fps,  # fps
+        video_length=video_length,
+        video_fps=video_fps,
         atol=atol,
         rtol=rtol,
         C=C,
@@ -656,16 +668,12 @@ def open_spectral_with_vorticity(filename):
 
     # add vorticity field
     grid, kx, ky = gridmesh_from_da(da)
-    # we normalize with the padding size
-    vorticity = (
-        jnp.fft.irfft2(
-            -(np.square(kx) + jnp.square(ky))
-            * jnp.fft.rfft2(jnp.array(da.sel(field="φ"))),
-            norm="forward",  # no normalization
-        )
-        / npx
-        / npy
-    )
+    vorticity = jnp.fft.irfft2(
+        -(np.square(kx) + jnp.square(ky))
+        * jnp.fft.rfft2(jnp.array(da.sel(field="φ"))),
+        norm="forward",  # no normalization
+    ) / npx / npy  # we normalize with the padding size
+
     vorticity = xr.DataArray(
         vorticity[..., None],
         dims=da.dims,
@@ -684,7 +692,7 @@ def plot_spectral_1D(filename):
 
     # plot history
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    x = (da.coords["x"].values,)
+    x = (da.coords["x"].values, )
     t = da.coords["time"].values
     for i, field_name in enumerate(("Ω", "n")):
         v = da.sel(field=field_name, y=0)
@@ -697,19 +705,26 @@ def plot_spectral_1D(filename):
 
     file_path = Path(filename)
     fig.savefig(
-        file_path.with_suffix(".pdf"), dpi=200, bbox_inches="tight", pad_inches=0
+        file_path.with_suffix(".pdf"),
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0
     )
 
     # decompose and plot
     y = jnp.fft.rfft(jnp.array(da), axis=2)
-    Ωk, nk, Ωb, nb = (
-        y[..., 1, 2],
-        y[..., 1, 1],
-        jnp.real(y[..., 0, 2]),
-        jnp.real(y[..., 0, 1]),
-    )
+    Ωk = y[..., 1, 2]
+    nk = y[..., 1, 1]
+    Ωb = jnp.real(y[..., 0, 2])
+    nb = jnp.real(y[..., 0, 1])
+
+    da.attrs.update({
+        "domain": da.attrs["domain"][0],
+        "filename": file_path.with_name("decompose.pdf"),
+    })
+
     da = xr.DataArray(
-        [jnp.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb],
+        data=[np.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb],
         dims=["field", "time", "x"],
         coords={
             "time": da.time,
@@ -717,21 +732,17 @@ def plot_spectral_1D(filename):
             "field": ["Ωk_real", "Ωk_imag", "nk_real", "nk_imag", "Ωb", "nb"],
         },
         attrs=da.attrs
-        | {
-            "domain": da.attrs["domain"][0],
-            "filename": file_path.with_name("decompose.pdf"),
-        },
     )
     plot_components_1D(da)
 
 
 def to_minimize(ky, C, D, κ, ν):
     ksq = np.square(ky)
-    a = (D * ksq + C + C / ksq + ν * ksq) / 2
-    b = (D * ksq + C - C / ksq - ν * ksq) / 2
+    a = (D*ksq + C + C/ksq + ν*ksq) / 2
+    b = (D*ksq + C - C/ksq - ν*ksq) / 2
     g = np.square(b) + np.square(C / ky)
     h = np.sqrt(np.square(g) + np.square(C * κ / ky))
-    j = np.sqrt((h + g) / 2)
+    j = np.sqrt((h+g) / 2)
     return a - j
 
 
@@ -793,8 +804,8 @@ def hasegawa_wakatani_finite_difference_1D(
         for χ in (C, κ, Dx, Dy, Dz, νx, νy, νz, ky)
     ]
 
-    shape = (grid_size,)
-    grid = grids.Grid((grid_size,), domain=[(0, domain)])
+    shape = (grid_size, )
+    grid = grids.Grid((grid_size, ), domain=[(0, domain)])
 
     bc_name, bc_value = process_boundary(boundary)
 
@@ -810,35 +821,42 @@ def hasegawa_wakatani_finite_difference_1D(
         for i in range(offset, n + offset):
             key, k1, k2, k3 = jax.random.split(key, num=4)
             y0 += (
+                # sinus phase
                 jnp.sin(
-                    i * x / (domain / 2) * jnp.pi
+                    i * x / (domain/2) * jnp.pi
                     + jax.random.uniform(k2, maxval=2 * jnp.pi)
-                )  # sinus phase
-                * jax.random.uniform(k1, minval=-A, maxval=A)  # amplitude
-                * jnp.exp(2j * jnp.pi * jax.random.uniform(k2))  # complex phase
+                )
+                # amplitude
+                * jax.random.uniform(k1, minval=-A, maxval=A)
+                # complex phase
+                * jnp.exp(2j * jnp.pi * jax.random.uniform(k2))
             )
         if bc_name != "periodic":
             σ = domain / 2 / 2
-            y0 *= jnp.exp(-jnp.square((x - domain / 2) / σ))  # apply gaussian window
+            # apply gaussian window
+            y0 *= jnp.exp(-jnp.square((x - domain/2) / σ))
             y0 = y0.at[jnp.array([0, -1])].set(0j)
         return y0.view(dtype=float)
 
     def random_field_(key, A=1e-4, σ=0.5):
         """Initialize in the fourier space."""
-        grid_ = grids.Grid((grid_size, 6), domain=[(0, domain), (0, 2 * jnp.pi / ky)])
+        grid_ = grids.Grid(
+            shape=(grid_size, 6), domain=[(0, domain), (0, 2 * jnp.pi / ky)]
+        )
         kxs, kys = rfft_mesh(grid_)
         y = init_hw_spectral_2d(grid_, key, A=A, σ=σ)
-        y = y.at[..., 0].set(
-            -y[..., 0] * (jnp.square(kxs) + jnp.square(kys))
-        )  # convert to Ω
+        #convert to Ω
+        y = y.at[..., 0].set(-y[..., 0] * (jnp.square(kxs) + jnp.square(kys)))
         y = jnp.fft.rfft(jnp.fft.irfft2(y, axes=(0, 1)), axis=1)
-        Ωk, nk, Ωb, nb = (
-            y[:, 1, 0],
-            y[..., 1, 1],
-            jnp.real(y[..., 0, 0]),
-            jnp.real(y[..., 0, 1]),
-        )
-        return jnp.concatenate([Ωk.view(dtype=float), nk.view(dtype=float), Ωb, nb])
+
+        Ωk = y[:, 1, 0]
+        nk = y[..., 1, 1]
+        Ωb = jnp.real(y[..., 0, 0])
+        nb = jnp.real(y[..., 0, 1])
+
+        return jnp.concatenate([
+            Ωk.view(dtype=float), nk.view(dtype=float), Ωb, nb
+        ])
 
     k1, k2 = jax.random.split(key)
     if bc_name == "force":
@@ -849,12 +867,16 @@ def hasegawa_wakatani_finite_difference_1D(
         )
 
         κ = 0
-        forcing = jnp.exp(-jnp.square((x - 0.1 * domain) / (domain / 10))) * bc_value
+        forcing = jnp.exp(
+            -jnp.square((x - 0.1*domain) / (domain/10))
+        ) * bc_value
         well = jnp.diag(forcing[::-1].at[-1].set(0))
         # buffering
         pad_size = int(grid_size * 0.05)
         pad = jnp.linspace(1, 100, pad_size)
-        padded = jnp.concatenate((pad[::-1], jnp.ones(grid_size - 2 * pad_size), pad))
+        padded = jnp.concatenate(
+            (pad[::-1], jnp.ones(grid_size - 2*pad_size), pad)
+        )
         νx_, νy_, νz_, Dx_, Dy_ = [padded * χ for χ in (νx, νy, νz, Dx, Dy)]
         y0 = jnp.concatenate((random_field(k1), random_field(k2), z, z))
         # y0 = jnp.zeros((6, grid_size))
@@ -871,17 +893,21 @@ def hasegawa_wakatani_finite_difference_1D(
         # y0 = jnp.concatenate((random_field(k1), random_field(k2), z, z))
         y0 = random_field_(key)
 
-    ddxk_inv = jnp.linalg.pinv(ddx.todense() - jnp.eye(grid_size) * ky2, hermitian=True)
+    ddxk_inv = jnp.linalg.pinv(
+        ddx.todense() - jnp.eye(grid_size) * ky2, hermitian=True
+    )
     ddx_inv = jnp.linalg.pinv(ddx.todense(), hermitian=True)
 
     def combine_state(dΩk, dnk, dΩb, dnb):
-        return jnp.concatenate([dΩk.view(dtype=float), dnk.view(dtype=float), dΩb, dnb])
+        return jnp.concatenate([
+            dΩk.view(dtype=float), dnk.view(dtype=float), dΩb, dnb
+        ])
 
     def split_state(y):
-        Ωk = y[..., : 2 * grid_size].view(dtype=complex)
-        nk = y[..., 2 * grid_size : 4 * grid_size].view(dtype=complex)
-        Ωb = y[..., 4 * grid_size : 5 * grid_size]
-        nb = y[..., 5 * grid_size :]
+        Ωk = y[..., :2 * grid_size].view(dtype=complex)
+        nk = y[..., 2 * grid_size:4 * grid_size].view(dtype=complex)
+        Ωb = y[..., 4 * grid_size:5 * grid_size]
+        nb = y[..., 5 * grid_size:]
         return Ωk, nk, Ωb, nb
 
     def explicit(t, y, args):  # convection, non-linear
@@ -891,22 +917,22 @@ def hasegawa_wakatani_finite_difference_1D(
         dφbdx = dx_force @ φb
 
         return ky * combine_state(
-            dΩk=1j * (dx_force @ Ωb * φk - dφbdx * Ωk),
-            dnk=1j * (dx_force @ nb * φk - dφbdx * nk),
+            dΩk=1j * (dx_force@Ωb*φk - dφbdx*Ωk),
+            dnk=1j * (dx_force@nb*φk - dφbdx*nk),
             dΩb=2 * dx @ jnp.imag(φc * Ωk),
-            dnb=2 * dx @ jnp.imag(φc * nk) + forcing / ky,
+            dnb=2 * dx @ jnp.imag(φc * nk) + forcing/ky,
         )
 
     def implicit(t, y, args):  # diffusion
         Ωk, Ωb, nk, nb = split_state(y)
         φk = Ω2φ @ Ωk
-        c_term = C * (φk - nk)
+        c_term = C * (φk-nk)
 
         return combine_state(
-            dΩk=c_term + νx * ddx @ Ωk - νy * ky2 * Ωk,
-            dnk=c_term + Dx * ddx @ nk - Dy * ky2 * nk - 1j * ky * κ * φk,
+            dΩk=c_term + νx*ddx@Ωk - νy*ky2*Ωk,
+            dnk=c_term + Dx*ddx@nk - Dy*ky2*nk - 1j*ky*κ*φk,
             dΩb=-νz * Ωb,
-            dnb=(Dz - well) * nb,
+            dnb=(Dz-well) * nb,
         )
 
     def step(t, y, args):
@@ -919,20 +945,14 @@ def hasegawa_wakatani_finite_difference_1D(
 
         φc = jnp.conjugate(φk)
         dφbdx = dx_force @ φb
-        c_term = C * (φk - nk)
+        c_term = C * (φk-nk)
 
         return combine_state(
-            dΩk=-1j * ky * (dφbdx * Ωk - (dx_force @ Ωb) * φk)
-            + c_term
-            + νx * ddx @ Ωk
-            - νy * ky2 * Ωk,
-            dnk=-1j * ky * (dφbdx * nk + (κ - dx_force @ nb) * φk)
-            + c_term
-            + Dx * ddx @ nk
-            - Dy * ky2 * nk,
-            dΩb=2 * ky * dx @ jnp.imag(φc * Ωk) - νz * Ωb,
-            dnb=2 * ky * dx @ jnp.imag(φc * nk) + (Dz - well) * nb + forcing,
-        )
+            dΩk=-1j * ky * (dφbdx*Ωk - (dx_force@Ωb) * φk) + c_term + νx*ddx@Ωk - νy*ky2*Ωk,
+            dnk=-1j * ky * (dφbdx*nk + (κ - dx_force@nb) * φk) + c_term + Dx*ddx@nk - Dy*ky2*nk,
+            dΩb=2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb,
+            dnb=2 * ky * dx @ jnp.imag(φc * nk) + (Dz-well) * nb + forcing,
+        ) # yapf: disable
 
     def step_(t, y, args):
         return explicit(t, y, args) + implicit(t, y, args)
@@ -943,17 +963,21 @@ def hasegawa_wakatani_finite_difference_1D(
         """decompose real and imag parts"""
         Ωk, nk, Ωb, nb = split_state(y)
         return jnp.stack(
-            [jnp.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb], axis=1
+            arrays=[
+                jnp.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb
+            ],
+            axis=1
         )
 
     def recompose(y):
         Ωk_real, Ωk_imag, nk_real, nk_imag, Ωb, nb = y
-        return combine_state(Ωk_real + 1j * Ωk_imag, nk_real + 1j * nk_imag, Ωb, nb)
+        return combine_state(
+            Ωk_real + 1j*Ωk_imag, nk_real + 1j*nk_imag, Ωb, nb
+        )
 
     return simulation_base(
         terms=MultiTerm(ODETerm(explicit), ODETerm(implicit))
-        if solver in imex_solvers
-        else ODETerm(step),
+        if solver in imex_solvers else ODETerm(step),
         tf=tf,
         coords={
             "field": ["Ωk_real", "Ωk_imag", "nk_real", "nk_imag", "Ωb", "nb"],
@@ -1011,19 +1035,17 @@ def plot_components_1D(filename, all=True):
     # φb = jnp.real(Ω2φ @ Ωb[..., None]).squeeze()
 
     fig, axes = plt.subplots(6, 1, figsize=(2, 15))
-    for i, (k, v) in enumerate(
-        {
+    for i, (k, v) in enumerate({
             "$\Omega_k$": Ωk,
             "$\overline{\Omega}$": Ωb,
-            "$\Omega$": Ωb + 2 * Ωk,
+            "$\Omega$": Ωb + 2*Ωk,
             "$n_k$": nk,
             "$\overline{n}$": nb,
-            "$n$": nb + 2 * nk,
+            "$n$": nb + 2*nk,
             # "$\phi_k$": φk,
             # "$\overline{\phi}$": φb,
             # "$\phi$": φb + 2 * φk
-        }.items()
-    ):
+    }.items()):
         ax = axes.ravel()[i]
         vmax = jnp.maximum(jnp.abs(v.min()), v.max())
         im = ax.pcolormesh(
@@ -1035,10 +1057,11 @@ def plot_components_1D(filename, all=True):
             vmax=vmax,
             rasterized=True,
         )
-        fig.colorbar(im, ax=ax, location="right").formatter.set_powerlimits((0, 0))
+        fig.colorbar(
+            im, ax=ax, location="right"
+        ).formatter.set_powerlimits((0, 0))
         ax_settings = {
-            "title": k,
-            # "ylabel": "time", #if i == 0 else None,
+            "title": k,  # "ylabel": "time", #if i == 0 else None,
             "xlabel": "x" if i == axes.shape[0] - 1 else None,
         }
         if i != axes.shape[0] - 1:  # // 3 != 1:
@@ -1049,10 +1072,11 @@ def plot_components_1D(filename, all=True):
         ax.set(**ax_settings)
 
     if boundary[0] == "force":
-        forcing = jnp.exp(-jnp.square((x - 0.1 * domain) / (domain / 10))) * float(
-            boundary[1]
+        forcing = (
+            jnp.exp(-jnp.square((x - 0.1*domain) / (domain/10)))
+            * float(boundary[1])
         )
-        forcing -= forcing[::-1]
+        forcing -= forcing[::-1]  # show the well
         ax = axes.ravel()[4].twinx()
         ax.plot(x, forcing, label="source")
         ax.set(yticks=[])
@@ -1061,7 +1085,8 @@ def plot_components_1D(filename, all=True):
     ax = axes.ravel()[5].twinx()
     n_profil = da.isel(time=-1)
     n_profil = (
-        n_profil.sel(field="nb") + 2 * n_profil.sel(field="nk_real") + κ * (domain - x)
+        n_profil.sel(field="nb") + 2 * n_profil.sel(field="nk_real") + κ *
+        (domain-x)
     )
     ax.plot(x, n_profil, label="profile")
     ax.set(yticks=[])
@@ -1108,16 +1133,14 @@ def simulation_base(
         with xr.open_dataarray(file_path, engine="h5netcdf") as da:
             da_old = da.load()
         # if all attrs are the same and tf is greater than the previous tf, it means we want to continue
-        if (
-            tf > da_old.attrs.get("tf", float("inf"))
-            and jnp.array(
-                [
-                    v == type(v)(da_old.attrs[k])
-                    for k, v in attrs.items()
-                    if isinstance(v, (int, float, str, tuple, list))
-                ]
-            ).all()
-        ):
+        same = jnp.array([(
+            np.array(v).shape == np.array(da_old.attrs[k]).shape
+            and v == type(v)(da_old.attrs[k])
+        ) for (k, v) in attrs.items() if (
+            isinstance(v, (int, float, str, tuple, list)) and k in da_old.attrs
+        )]).all()
+
+        if tf > da_old.attrs.get("tf", float("inf")) and same:
             t0 = da_old.attrs["tf"]
             resume = True
             print(f"The simulation is resumed from {filename}.")
@@ -1125,7 +1148,7 @@ def simulation_base(
     video_nframes = int(video_length * video_fps)
     if resume:
         time_linspace = jnp.linspace(
-            t0 + 1 / video_fps, tf, int((tf - t0) / tf * video_nframes)
+            t0 + 1/video_fps, tf, int((tf-t0) / tf * video_nframes)
         )
         y0 = jnp.array(da_old.isel(time=-1))
         if apply:
@@ -1143,35 +1166,36 @@ def simulation_base(
         "atol": atol,
         "rtol": rtol,
     }
+
     for k, v in attrs_.items():
         # print only short parameters
-        if not isinstance(v, (np.ndarray,)):
+        if not isinstance(v, (np.ndarray, )):
             print(f"{k:<20}: {v}")
 
     t1 = timer()
     with tqdm.auto.tqdm(
-        total=tf,
-        desc="Simulation",
-        bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
-        initial=t0,
+            total=tf,
+            desc="Simulation",
+            bar_format=
+            "{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+            initial=t0,
     ) as tqdm_bar:
         sol = diffeqsolve(
             terms=terms,
             solver=SolverWrapTqdm(
-                solvers[solver], tqdm_bar=tqdm_bar, nonlinear_solver=nonlinear_solver
+                solvers[solver],
+                tqdm_bar=tqdm_bar,
+                nonlinear_solver=nonlinear_solver
             ),
             t0=t0,
             t1=tf,
             dt0=1e-3,
             y0=y0,
-            saveat=SaveAt(ts=time_linspace, solver_state=True, controller_state=True),
-            stepsize_controller=PIDController(
-                atol=atol, rtol=rtol
-            ),  # , pcoeff=0.4, icoeff=0.3),
+            saveat=SaveAt(
+                ts=time_linspace, solver_state=True, controller_state=True
+            ),
+            stepsize_controller=PIDController(atol=atol, rtol=rtol),
             max_steps=None,
-            # discrete_terminating_event=diffrax.DiscreteTerminatingEvent(lambda state, **kwargs: jax.lax.cond(state.tprev > tf, lambda *args: True, lambda *args: False))
-            # controller_state=kwargs.get("controller_state", None),
-            # solver_state=kwargs.get("solver_state", None),
         )
 
     attrs_["runtime"] = timer() - t1
@@ -1194,7 +1218,9 @@ def simulation_base(
     return da
 
 
-def diff_matrix(grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=False):
+def diff_matrix(
+    grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=False
+):
     if isinstance(axis, int):
         op = FinDiff(axis, grid.step[axis], order, acc=acc)
     else:
@@ -1203,7 +1229,7 @@ def diff_matrix(grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=Fa
     square_size = jnp.prod(jnp.array(grid.shape))
     op_shape = (square_size, square_size)
     if bc_name == "periodic":
-        pos = jnp.prod(jnp.array(grid.shape[:-1], dtype=int) + 1) * (acc - 1)
+        pos = jnp.prod(jnp.array(grid.shape[:-1], dtype=int) + 1) * (acc-1)
         op = op.matrix(grid.shape)[pos].toarray()
         row = jnp.roll(jnp.array(op), -pos).squeeze()
         indices = jnp.nonzero(row)[0]
@@ -1212,9 +1238,8 @@ def diff_matrix(grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=Fa
         if csr:
             indptr = jnp.arange(0, len(data) + 1, len(indices))
             indices = jnp.concatenate(
-                jax.vmap(lambda i: (indices + i) % square_size)(
-                    jnp.arange(square_size)
-                ),
+                jax.vmap(fun=lambda i: (indices+i) % square_size
+                         )(jnp.arange(square_size)),
                 axis=0,
             )
             op = sparse.CSR((data, indices, indptr), shape=op_shape)
@@ -1223,8 +1248,8 @@ def diff_matrix(grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=Fa
             ones = jnp.ones_like(indices)
             indices = jnp.concatenate(
                 jax.vmap(
-                    lambda i: jnp.stack(
-                        (ones * i, (indices + i) % square_size), axis=-1
+                    fun=lambda i: jnp.stack(
+                        arrays=(ones * i, (indices+i) % square_size), axis=-1
                     )
                 )(jnp.arange(square_size)),
                 axis=0,
@@ -1252,9 +1277,8 @@ def diff_matrix(grid, axis, order, acc=2, bc_name="periodic", bc_value=0, csr=Fa
             op = sparse.BCSR((op.data, op.indices, op.indptr), shape=op_shape)
         else:
             op = op.tocoo()
-            op = sparse.BCOO(
-                (op.data, jnp.stack([op.row, op.col], axis=-1)), shape=op_shape
-            )
+            op = sparse.BCOO((op.data, jnp.stack([op.row, op.col], axis=-1)),
+                             shape=op_shape)
     return op, nz, rhs
 
 
@@ -1264,14 +1288,14 @@ def hasegawa_wakatani_finite_difference_2D(
     domain=16 * jnp.pi,
     video_length=10.0,
     video_fps=20,
-    atol=1e-5,
-    rtol=1e-5,
+    atol=1e-9,
+    rtol=1e-6,
     C=1,
     κ=1,
-    D=1,
-    Dz=0,
-    ν=1,
-    νz=0,
+    D=1e-1,
+    Dz=1e-2,
+    ν=1e-1,
+    νz=1e-2,
     boundary="periodic",
     acc=2,
     filename=None,
@@ -1281,21 +1305,23 @@ def hasegawa_wakatani_finite_difference_2D(
     C, κ, D, Dz, ν, νz = [
         χ.item() if hasattr(χ, "item") else χ for χ in (C, κ, D, Dz, ν, νz)
     ]
+
     bc_name, bc_value = process_boundary(boundary)
     nx, ny, lx, ly, grid = process_params_2D(grid_size, domain)
+
     if bc_name == "periodic":
         y0 = init_hw_spectral_2d(grid, key=jax.random.PRNGKey(seed=seed))
         y0 = jnp.fft.irfft2(y0, axes=(0, 1))
     else:
         xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
         σx, σy = lx / 10, ly / 10
-        n = (
-            jnp.exp(-(jnp.square((xv - lx / 2) / σx) + jnp.square((yv - ly / 2) / σy)))
-            * 1e-2
-        )
+        n = jnp.exp(
+            -(jnp.square((xv - lx/2) / σx) + jnp.square((yv - ly/2) / σy))
+        ) * 1e-2
         Ω = jnp.zeros(grid.shape)
         Ω, n = [χ.at[nz].set(rhs) for χ in (Ω, n)]
         y0 = jnp.stack([Ω, n], axis=-1)
+
     diff_matrix_kwargs = {
         "grid": grid,
         "acc": acc,
@@ -1308,6 +1334,7 @@ def hasegawa_wakatani_finite_difference_2D(
     laplacian_csr, nz, rhs = diff_matrix(
         axis=[0, 1], order=2, **diff_matrix_kwargs, csr=True
     )
+
     # print("computing the pseudo-inverse: very slow !")
     # laplacian_inv = jnp.linalg.pinv(laplacian_bcoo.todense(), hermitian=True)
 
@@ -1329,22 +1356,15 @@ def hasegawa_wakatani_finite_difference_2D(
         # φ = sparse.linalg.spsolve(laplacian_csr.data, laplacian_csr.indices, laplacian_csr.indptr, Ω.ravel(), tol=atol).reshape(nx, ny)
         Ωb, nb, φb = [jnp.mean(χ, axis=1) for χ in (Ω, n, φ)]
         Ωt, nt, φt = Ω - Ωb, n - nb, φ - φb
-        c_term = C * (φt - nt)
+        c_term = C * (φt-nt)
 
         dφdx = dx(φ)
         dφdy = dy(φ)
-        return jnp.stack(
-            [
-                dφdy * dx(Ω) - dφdx * dy(Ω) + c_term + ν * laplacian(Ωt) - νz * Ωb,
-                dφdy * dx(n)
-                - dφdx * dy(n)
-                + c_term
-                + D * laplacian(nt)
-                - Dz * nb
-                - κ * dφdy,
-            ],
-            axis=-1,
-        )
+
+        dΩ = dφdy * dx(Ω) - dφdx * dy(Ω) + c_term + ν * laplacian(Ωt) - νz*Ωb
+        dn = dφdy * dx(n) - dφdx * dy(n) + c_term + D * laplacian(nt) - Dz*nb
+        dn -= κ * dφdy
+        return jnp.stack(arrays=[dΩ, dn], axis=-1)
 
     return simulation_base(
         terms=ODETerm(step),
@@ -1376,7 +1396,6 @@ def hasegawa_wakatani_finite_difference_2D(
         video_length=video_length,
         video_fps=video_fps,
         filename=filename,
-        # apply=(recompose, decompose)
     )
 
 
@@ -1387,7 +1406,8 @@ def main():
     parser.add_argument(
         "--cpu",
         action="store_true",
-        help="Force using CPU when jax is configured with GPU. TODO: create a seperate file and import after jax.config.update()",
+        help=
+        "Force using CPU when jax is configured with GPU. TODO: create a seperate file and import after jax.config.update()",
     )
     parser.add_argument(
         "--eager",
@@ -1404,22 +1424,14 @@ def main():
         jax.config.update("jax_disable_jit", False)
 
     schemes = {
-        "hasegawa_wakatani_spectral_2D": (
-            hasegawa_wakatani_spectral_2D,
-            visualization_2D,
-        ),
-        "hasegawa_wakatani_spectral_1D": (
-            hasegawa_wakatani_spectral_1D,
-            plot_spectral_1D,
-        ),
-        "hasegawa_wakatani_finite_difference_1D": (
-            hasegawa_wakatani_finite_difference_1D,
-            plot_components_1D,
-        ),
-        "hasegawa_wakatani_finite_difference_2D": (
-            hasegawa_wakatani_finite_difference_2D,
-            visualization_2D,
-        ),
+        "hasegawa_wakatani_spectral_2D":
+        (hasegawa_wakatani_spectral_2D, visualization_2D),
+        "hasegawa_wakatani_spectral_1D":
+        (hasegawa_wakatani_spectral_1D, plot_spectral_1D),
+        "hasegawa_wakatani_finite_difference_1D":
+        (hasegawa_wakatani_finite_difference_1D, plot_components_1D),
+        "hasegawa_wakatani_finite_difference_2D":
+        (hasegawa_wakatani_finite_difference_2D, visualization_2D),
     }
     p = Path(args.filename)
     if p.suffix == ".yaml":
@@ -1431,9 +1443,13 @@ def main():
         assert (
             len(set(yaml_data.keys()).intersection(schemes.keys())) == 1
         ), f"Choose only one scheme among {schemes.keys()}"
+
         model = [k for k in schemes if k in yaml_data][0]
         simulation, post_process = schemes[model]
-        simulation_kwargs = {"filename": p.with_suffix(".nc")} | yaml_data[model]
+        simulation_kwargs = {
+            "filename": p.with_suffix(".nc")
+        } | yaml_data[model]
+
         simulation(**simulation_kwargs)
         post_process(simulation_kwargs["filename"])
 
@@ -1449,12 +1465,10 @@ def main():
         simulation, post_process = schemes[model]
         # resume
         if args.tf is not None:
-            simulation_kwargs.update(
-                {
-                    "tf": args.tf,
-                    "filename": p,
-                }
-            )
+            simulation_kwargs.update({
+                "tf": args.tf,
+                "filename": p,
+            })
             simulation_kwargs = {
                 k: simulation_kwargs[k]
                 for k in signature(simulation).parameters
@@ -1468,4 +1482,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
