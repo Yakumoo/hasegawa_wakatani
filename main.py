@@ -207,11 +207,7 @@ class SolverWrapTqdm(AbstractWrappedSolver):
         last_t = jax.lax.cond(
             t1 > last_t + self.dt,
             lambda: host_callback.id_tap(
-                lambda t,
-                transform: self.tqdm_bar.update(
-                    t  # self.tqdm_bar.total - self.tqdm_bar.n
-                    # if self.tqdm_bar.n + t > self.tqdm_bar.total else t
-                ),
+                tap_func=(lambda t, transform: self.tqdm_bar.update(t)),
                 arg=t1 - last_t,
                 result=t1,
             ),
@@ -724,7 +720,7 @@ def plot_spectral_1D(filename):
     })
 
     da = xr.DataArray(
-        data=[np.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb],
+        data=[jnp.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb],
         dims=["field", "time", "x"],
         coords={
             "time": da.time,
