@@ -623,14 +623,18 @@ def hasegawa_wakatani_spectral_1D(
     νx=1e-2,
     νy=1e-4,
     νz=1e-5,
+    ky=None,
     filename=None,
     seed=42,
     solver="Dopri8",
 ):
+
+    ky = ky or find_ky(C=C, D=Dy, κ=κ, ν=νy)
+
     da = hasegawa_wakatani_spectral_2D(
         tf=tf,
         grid_size=(grid_size, 6),
-        domain=(domain, 2 * jnp.pi / find_ky(C=C, D=Dy, κ=κ, ν=νy)),
+        domain=(domain, 2 * jnp.pi / ky),
         video_length=video_length,
         video_fps=video_fps,
         atol=atol,
@@ -649,7 +653,10 @@ def hasegawa_wakatani_spectral_1D(
     )
 
     # overwrite the model name
-    da.attrs["model"] = "hasegawa_wakatani_spectral_1D"
+    da.attrs.update({
+        "model": "hasegawa_wakatani_spectral_1D",
+        "ky": ky,
+    })
     da.to_netcdf(filename, engine="h5netcdf")
 
 
@@ -716,7 +723,7 @@ def plot_spectral_1D(filename):
 
     da.attrs.update({
         "domain": da.attrs["domain"][0],
-        "filename": file_path.with_name("decompose.pdf"),
+        "filename": file_path,
     })
 
     da = xr.DataArray(
@@ -1030,7 +1037,10 @@ def plot_components_1D(filename, all=True):
     # φk = jnp.real(Ω2φ @ Ωk[..., None]).squeeze()
     # φb = jnp.real(Ω2φ @ Ωb[..., None]).squeeze()
 
-    fig, axes = plt.subplots(6, 1, figsize=(2, 15))
+    nrows = 2
+    ncolumns = 3
+    fig, axes = plt.subplots(nrows, ncolumns, figsize=(7, 4))  #(2, 15))
+
     for i, (k, v) in enumerate({
             "$\Omega_k$": Ωk,
             "$\overline{\Omega}$": Ωb,
@@ -1054,17 +1064,24 @@ def plot_components_1D(filename, all=True):
             rasterized=True,
         )
         fig.colorbar(
-            im, ax=ax, location="right"
+            im,
+            ax=ax,
+            location="right",
+            cax=ax.inset_axes([1.04, 0, 0.02, 1]),
         ).formatter.set_powerlimits((0, 0))
-        ax_settings = {
-            "title": k,  # "ylabel": "time", #if i == 0 else None,
-            "xlabel": "x" if i == axes.shape[0] - 1 else None,
-        }
-        if i != axes.shape[0] - 1:  # // 3 != 1:
+
+        ax_settings = {"title": k}
+
+        if i // (ncolumns) == nrows - 1:
+            ax_settings["xlabel"] = "x"
+        else:
             ax_settings["xticks"] = []
 
-        # if i >0:#% 3 != 0:
-        ax_settings["yticks"] = []
+        if i % ncolumns == 0:
+            ax_settings["ylabel"] = "time"
+        else:
+            ax_settings["yticks"] = []
+
         ax.set(**ax_settings)
 
     if boundary[0] == "force":
@@ -1088,9 +1105,14 @@ def plot_components_1D(filename, all=True):
     ax.set(yticks=[])
     ax.legend(fontsize="small")
 
-    # fig.tight_layout()
+    fig.tight_layout()
     file_path = Path(filename)
-    fig.savefig(file_path.with_suffix(".pdf"), dpi=200, bbox_inches="tight")
+    fig.savefig(
+        file_path.with_name(f"{file_path.stem}_decompose.pdf"),
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0
+    )
 
     return Ωk, nk, Ωb, nb
 
