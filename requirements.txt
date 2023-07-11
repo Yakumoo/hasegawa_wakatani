@@ -5,7 +5,7 @@ yaml
 tqdm
 scipy
 findiff
-h5netcdf
+zarr
 
 jax
 diffrax

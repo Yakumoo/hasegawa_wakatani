@@ -2,6 +2,7 @@
 
 # yapf main.py -i --style='{DEDENT_CLOSING_BRACKETS = true, COALESCE_BRACKETS = true, ARITHMETIC_PRECEDENCE_INDICATION = true, SPLIT_ALL_TOP_LEVEL_COMMA_SEPARATED_VALUES = true, SPLIT_BEFORE_ARITHMETIC_OPERATOR = true, SPLIT_BEFORE_DOT = true, SPLIT_BEFORE_EXPRESSION_AFTER_OPENING_PAREN = true, SPLIT_BEFORE_FIRST_ARGUMENT = true}'
 
+import os
 from inspect import signature
 from pathlib import Path
 from datetime import timedelta
@@ -54,15 +55,15 @@ from diffrax import (
 )
 
 
-def brick_wall_filter_2d(grid: grids.Grid):
+def brick_wall_filter_2d(grid):
     """Implements the 2/3 rule."""
     npx, npy = grid.shape
     nx, ny = npx // 3, npy//3 + 1
-    filter_ = jnp.zeros((npx, npy//2 + 1))
-    filter_ = filter_.at[:nx, :ny].set(1)
-    filter_ = filter_.at[-nx:, :ny].set(1)
+    filter = jnp.zeros((npx, npy//2 + 1))
+    filter = filter.at[:nx, :ny].set(1)
+    filter = filter.at[-nx:, :ny].set(1)
 
-    return filter_
+    return filter
 
 
 @dataclasses.dataclass
@@ -89,11 +90,9 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
     κ: float = 1
 
     def __post_init__(self):
-        self.kx, self.ky = self.grid.rfft_mesh()
-        self.kx *= 2 * jnp.pi
-        self.ky *= 2 * jnp.pi
-        self.kx2, self.ky2 = jnp.square(self.kx), jnp.square(self.ky)
-        self.ksq = jnp.square(self.kx) + jnp.square(self.ky)
+        self.kx, self.ky = rfft_mesh(self.grid)
+        kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
+        self.ksq = kx2 + ky2
         self.ksq_div = self.ksq.at[0, 0].set(1)  # use this one for division
 
         npx, npy = self.grid.shape
@@ -107,12 +106,11 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
         self.linear_term = jnp.empty((*self.ksq.shape, 2, 2), dtype=complex)
         self.linear_term = (
             self.linear_term.at[:, :, 0, 0].set(
-                -self.C / self.ksq_div - self.νx * self.kx2
-                - self.νy * self.ky2
+                -self.C / self.ksq_div - self.νx * kx2 - self.νy * ky2
             )
             .at[:, :, 0, 1].set(self.C / self.ksq_div)
             .at[:, :, 1, 0].set(-1j * self.ky * self.κ + self.C)
-            .at[:, :, 1, 1].set(-self.C - self.Dx * self.kx2 - self.Dy * self.ky2)
+            .at[:, :, 1, 1].set(-self.C - self.Dx * kx2 - self.Dy * ky2)
             # zonal flows
             .at[:, 0, 0, 0].set(-self.νz * self.ksq[:, 0])
             .at[:, 0, 0, 1].set(0)
@@ -305,22 +303,39 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
         return f1 + f2
 
 
-def init_hw_spectral_2d(grid, key, A=1e-4, σ=0.5):
+def unpad(y, grid, axes=(-2, -1)):
+    npx, npy = grid.shape
+    nx = int(npx / 3) * 2
+    ny = npy//3 + 1
+    mask = brick_wall_filter_2d(grid).astype(bool)
+    new_shape = list(y.shape)
+    new_shape[axes[0]] = nx
+    new_shape[axes[1]] = ny
+    index = [slice(None)] * (len(new_shape) - 1)
+    index[axes[0]] = mask
+    return y[tuple(index)].reshape(*new_shape)
+
+
+def init_hw_spectral_2d(grid, key, n=1, A=1e-4, σ=0.5):
     """
     Create the 2 initial fields in the fourier space:
     electric potential and density
+    n: nb of fields
+    if unpad=True, remove the padding (smaller shape)
 
     return: array of shape (grid_x, grid_y // 2 + 1, 2)
     """
     kx, ky = rfft_mesh(grid)
-    fh = A * jnp.exp(
+    ŷ0 = A * jnp.exp(
         -(jnp.square(kx) + jnp.square(ky)) / 2 / jnp.square(σ)
         + 1j * jax.random.uniform(key, kx.shape, maxval=2 * jnp.pi)
     )
+    ŷ0 = make_hermitian(ŷ0)
 
-    yh = make_hermitian(jnp.stack((fh, fh), axis=-1))
+    if n > 1:
+        ŷ0 = jnp.tile(ŷ0[..., None], reps=(1, n))
 
-    return yh
+    return ŷ0
 
 
 def process_params_2D(grid_size, domain):
@@ -378,7 +393,7 @@ def hasegawa_wakatani_spectral_2D(
     )
 
     yh0 = (
-        init_hw_spectral_2d(grid=grid, key=jax.random.PRNGKey(seed=seed))
+        init_hw_spectral_2d(grid=grid, key=jax.random.PRNGKey(seed=seed), n=2)
         * brick_wall_filter_2d(grid)[..., None]
     )
 
@@ -396,7 +411,8 @@ def hasegawa_wakatani_spectral_2D(
         y = jax.device_put(
             yh, device=jax.devices("cpu")[0]
         ).view(dtype=complex)
-        y = y[:, m.mask].reshape(-1, m.nx, m.ny, 2)  # unpad
+        y = unpad(y, grid, axes=(1, 2))
+        # y = y[:, m.mask].reshape(-1, m.nx, m.ny, 2)  # unpad
         y = jnp.fft.irfft2(y, axes=(1, 2))
         return y
 
@@ -443,9 +459,7 @@ def hasegawa_wakatani_spectral_2D(
 
 
 def rfft_mesh(grid):
-    k = grid.rfft_mesh()
-    k = 2 * jnp.pi * jnp.array(k)
-    return k
+    return 2 * jnp.pi * jnp.array(grid.rfft_mesh())
 
 
 def gridmesh_from_da(da):
@@ -563,7 +577,7 @@ def plot_time_frames_2D(filename, frames=[0, 0.25, 0.5, 1]):
     fig.tight_layout()
     file_path = Path(filename)
     fig.savefig(
-        file_path.with_name(f"time_frames.pdf"),
+        file_path.with_name(f"{file_path.stem}_time_frames.pdf"),
         dpi=100,
         bbox_inches="tight",
         pad_inches=0,
@@ -630,11 +644,14 @@ def hasegawa_wakatani_spectral_1D(
 ):
 
     ky = ky or find_ky(C=C, D=Dy, κ=κ, ν=νy)
+    # take the first element if sized
+    npx = grid_size[0] if hasattr(grid_size, "__len__") else grid_size
+    lx = domain[0] if hasattr(domain, "__len__") else domain
 
     da = hasegawa_wakatani_spectral_2D(
         tf=tf,
-        grid_size=(grid_size, 6),
-        domain=(domain, 2 * jnp.pi / ky),
+        grid_size=(npx, 6),
+        domain=(lx, 2 * jnp.pi / ky),
         video_length=video_length,
         video_fps=video_fps,
         atol=atol,
@@ -657,11 +674,11 @@ def hasegawa_wakatani_spectral_1D(
         "model": "hasegawa_wakatani_spectral_1D",
         "ky": ky,
     })
-    da.to_netcdf(filename, engine="h5netcdf")
+    da.to_zarr(filename, mode="w")
 
 
 def open_spectral_with_vorticity(filename):
-    with xr.open_dataarray(filename, engine="h5netcdf") as da:
+    with xr.open_dataarray(filename, engine="zarr") as da:
         npx, npy = da.attrs["grid_size"]
         lx, ly = da.attrs["domain"]
         da = da.load()
@@ -739,19 +756,27 @@ def plot_spectral_1D(filename):
     plot_components_1D(da)
 
 
-def to_minimize(ky, C, D, κ, ν):
+def hasegawa_wakatani_growth_rate(ky, C, D, κ, ν):
     ksq = np.square(ky)
     a = (D*ksq + C + C/ksq + ν*ksq) / 2
     b = (D*ksq + C - C/ksq - ν*ksq) / 2
     g = np.square(b) + np.square(C / ky)
     h = np.sqrt(np.square(g) + np.square(C * κ / ky))
     j = np.sqrt((h+g) / 2)
-    return a - j
+    return j - a
 
 
 def find_ky(C, D, κ, ν):
     return scipy.optimize.minimize_scalar(
-        to_minimize, bounds=(1e-4, 10), args=(C, D, κ, ν)
+        fun=(
+            lambda ky,
+            C,
+            D,
+            κ,
+            ν: -hasegawa_wakatani_growth_rate(ky, C, D, κ, ν)
+        ),
+        bounds=(1e-4, 10),
+        args=(C, D, κ, ν)
     ).x.item()
 
 
@@ -844,12 +869,14 @@ def hasegawa_wakatani_finite_difference_1D(
     def random_field_(key, A=1e-4, σ=0.5):
         """Initialize in the fourier space."""
         grid_ = grids.Grid(
-            shape=(grid_size, 6), domain=[(0, domain), (0, 2 * jnp.pi / ky)]
+            shape=(int(jnp.ceil(grid_size * 3 / 4) * 2), 6),
+            domain=[(0, domain), (0, 2 * jnp.pi / ky)]
         )
         kxs, kys = rfft_mesh(grid_)
-        y = init_hw_spectral_2d(grid_, key, A=A, σ=σ)
+        y = init_hw_spectral_2d(grid_, key, n=2, A=A, σ=σ)
         #convert to Ω
         y = y.at[..., 0].set(-y[..., 0] * (jnp.square(kxs) + jnp.square(kys)))
+        y = unpad(y, grid_, axes=(0, 1))
         y = jnp.fft.rfft(jnp.fft.irfft2(y, axes=(0, 1)), axis=1)
 
         Ωk = y[:, 1, 0]
@@ -915,7 +942,7 @@ def hasegawa_wakatani_finite_difference_1D(
 
     def explicit(t, y, args):  # convection, non-linear
         Ωk, Ωb, nk, nb = split_state(y)
-        φk, φb = Ω2φ @ Ωk, Ω2φ @ Ωb
+        φk, φb = ddxk_inv @ Ωk, ddx_inv @ Ωb
         φc = jnp.conjugate(φk)
         dφbdx = dx_force @ φb
 
@@ -928,7 +955,7 @@ def hasegawa_wakatani_finite_difference_1D(
 
     def implicit(t, y, args):  # diffusion
         Ωk, Ωb, nk, nb = split_state(y)
-        φk = Ω2φ @ Ωk
+        φk = ddxk_inv @ Ωk
         c_term = C * (φk-nk)
 
         return combine_state(
@@ -1016,16 +1043,15 @@ def hasegawa_wakatani_finite_difference_1D(
 
 def plot_components_1D(filename, all=True):
     if not isinstance(filename, xr.DataArray):
-        with xr.open_dataarray(filename, engine="h5netcdf") as da:
+        with xr.open_dataarray(filename, engine="zarr") as da:
             da = da.load()
     else:
         da = filename
         filename = da.attrs["filename"]
 
-    Ωk, nk, Ωb, nb = [
-        jnp.array(da.sel(field=fieldname))
-        for fieldname in ("Ωk_real", "nk_real", "Ωb", "nb")
-    ]
+    Ωk_real, Ωk_imag, nk_real, nk_imag, Ωb, nb = jnp.array(da.transpose("field", ...))
+    Ωk = Ωk_real  #jnp.abs(Ωk_real + 1j * Ωk_imag)
+    nk = nk_real  #jnp.abs(nk_real + 1j * nk_imag)
     # Ω2φ = da.attrs["Ω2φ"]
     domain = da.attrs["domain"]
     grid_size = da.attrs["grid_size"]
@@ -1117,6 +1143,58 @@ def plot_components_1D(filename, all=True):
     return Ωk, nk, Ωb, nb
 
 
+def get_available_memory():
+    """Return the available memory in GB"""
+    if jax.lib.xla_bridge.get_backend().platform == "gpu":
+        import subprocess
+        command = "nvidia-smi --query-gpu=memory.total --format=csv"
+        memory_info = subprocess.check_output(
+            command.split()
+        ).decode('ascii').split('\n')[:-1][1:]
+        memory_values = [int(x.split()[0]) for i, x in enumerate(memory_info)]
+        memory_value = memory_values[0]  # take the first gpu
+        return memory_value * float(
+            os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", 0.9)
+        ) / 1000
+    else:
+        import psutil
+        return psutil.virtual_memory()[3] / 1000000000
+
+
+def solve(diffeqsolve_kwargs, max_memory_will_use, save):
+    """Split the simulation if the memory usage is too large."""
+
+    def solve_(kwargs):
+        return diffeqsolve(**kwargs)
+
+    available_memory = get_available_memory()
+    ts = diffeqsolve_kwargs["saveat"].subs.ts
+
+    if max_memory_will_use > available_memory:
+        n_iters = int(max_memory_will_use / available_memory) + 1
+        tss = jnp.array_split(ts, n_iters)
+        for i in range(n_iters):
+            diffeqsolve_kwargs.update({
+                "saveat":
+                SaveAt(ts=tss[i], controller_state=True, solver_state=True),
+                "t0":
+                tss[i][0],
+                "tf":
+                tss[i][-1],
+            })
+            sol = solve_(**diffeqsolve_kwargs)
+            diffeqsolve_kwargs.update({
+                "y0": sol.ys[-1],
+                "controller_state": sol.controller_state,
+                "solver_state": sol.solver_state,
+            })
+            da = save(sol.ys)
+    else:
+        da = save(solve_(diffeqsolve_kwargs).ys, ts)
+
+    return da
+
+
 def simulation_base(
     terms,
     tf,
@@ -1124,8 +1202,8 @@ def simulation_base(
     attrs,
     y0,
     solver="Dopri8",
-    atol=1e-3,
-    rtol=1e-3,
+    atol=1e-6,
+    rtol=1e-6,
     video_length=1,
     video_fps=20,
     apply=None,
@@ -1148,30 +1226,45 @@ def simulation_base(
         assert solver in solvers
 
     if file_path.exists():
-        with xr.open_dataarray(file_path, engine="h5netcdf") as da:
-            da_old = da.load()
-        # if all attrs are the same and tf is greater than the previous tf, it means we want to continue
-        same = jnp.array([(
-            np.array(v).shape == np.array(da_old.attrs[k]).shape
-            and v == type(v)(da_old.attrs[k])
-        ) for (k, v) in attrs.items() if (
-            isinstance(v, (int, float, str, tuple, list)) and k in da_old.attrs
-        )]).all()
+        with xr.open_dataarray(file_path, engine="zarr") as da:
+            # da_old = da.load()
+            # if all attrs are the same and tf is greater than the previous tf, it means we want to continue
+            same = jnp.array([(
+                np.array(v).shape == np.array(da.attrs[k]).shape
+                and v == type(v)(da.attrs[k])
+            ) for (k, v) in attrs.items() if (
+                isinstance(v, (int, float, str, tuple, list)) and k in da.attrs
+            )]).all()
 
-        if tf > da_old.attrs.get("tf", float("inf")) and same:
-            t0 = da_old.attrs["tf"]
-            resume = True
-            print(f"The simulation is resumed from {filename}.")
+            if tf > da.attrs.get("tf", float("inf")) and same:
+                t0 = da.attrs["tf"]
+                y0 = jnp.array(da.isel(time=-1))
+                runtime_old = da.attrs.get("runtime", 0)
+                resume = True
+                print(f"The simulation is resumed from {filename}.")
 
+    dims = ["time"] + list(coords.keys())
     video_nframes = int(video_length * video_fps)
     if resume:
         time_linspace = jnp.linspace(
             t0 + 1/video_fps, tf, int((tf-t0) / tf * video_nframes)
         )
-        y0 = jnp.array(da_old.isel(time=-1))
         if apply:
             y0 = apply[0](y0)
     else:
+        # overwrite with an empty file
+        y_dummy = apply[1](y0[None]) if apply is not None else y0[None]
+        xr.DataArray(
+            data=jnp.array([]).reshape(-1, *y_dummy.shape[1:]),
+            dims=dims,
+            coords={
+                "time": []
+            } | coords,
+        ).to_zarr(
+            file_path, mode="w"
+        )
+
+        runtime_old = 0
         t0 = 0
         # the number of frames saved is video_nframes, it is not proportional to tf
         time_linspace = jnp.linspace(t0, tf, video_nframes)
@@ -1190,6 +1283,29 @@ def simulation_base(
         if not isinstance(v, (np.ndarray, )):
             print(f"{k:<20}: {v}")
 
+    max_memory_will_use = (
+        video_nframes * jnp.prod(jnp.array(y0.shape)) * {
+            jnp.dtype("float64"): 8, jnp.dtype("float32"): 4
+        }[y0.dtype]  # number of bytes
+        * 2  # it seems it will be buffered twice ...
+        / 1000000000  # convert to GB
+    )
+
+    def save(ys, ts):
+        da = xr.DataArray(
+            apply[1](ys) if apply else ys,
+            dims=dims,
+            coords={"time": ts} | coords,
+            attrs=attrs_,
+        )
+
+        if filename is not None:
+            da.to_zarr(
+                file_path, append_dim="time" if file_path.exists() else None
+            )
+
+        return da
+
     t1 = timer()
     with tqdm.auto.tqdm(
             total=tf,
@@ -1198,7 +1314,8 @@ def simulation_base(
             "{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
             initial=t0,
     ) as tqdm_bar:
-        sol = diffeqsolve(
+
+        diffeqsolve_kwargs = dict(
             terms=terms,
             solver=SolverWrapTqdm(
                 solvers[solver],
@@ -1209,29 +1326,16 @@ def simulation_base(
             t1=tf,
             dt0=1e-3,
             y0=y0,
-            saveat=SaveAt(
-                ts=time_linspace, solver_state=True, controller_state=True
-            ),
+            saveat=SaveAt(ts=time_linspace),
             stepsize_controller=PIDController(atol=atol, rtol=rtol),
             max_steps=None,
         )
+        da = solve(diffeqsolve_kwargs, max_memory_will_use, save)
 
-    attrs_["runtime"] = timer() - t1
-
-    da = xr.DataArray(
-        apply[1](sol.ys) if apply else sol.ys,
-        dims=["time"] + list(coords.keys()),
-        coords={"time": time_linspace} | coords,
-        attrs=attrs_,
-    )
-
-    if resume:
-        da = xr.concat((da_old, da), dim="time", combine_attrs="drop")
-        attrs_["runtime"] += da_old.attrs["runtime"]
-        da.attrs.update(attrs_)
-
+    # add the runtime in the attributes
+    da.attrs["runtime"] = runtime_old + timer() - t1
     if filename is not None:
-        da.to_netcdf(file_path, engine="h5netcdf")
+        da.to_zarr(file_path, mode="w")
 
     return da
 
@@ -1327,19 +1431,6 @@ def hasegawa_wakatani_finite_difference_2D(
     bc_name, bc_value = process_boundary(boundary)
     nx, ny, lx, ly, grid = process_params_2D(grid_size, domain)
 
-    if bc_name == "periodic":
-        y0 = init_hw_spectral_2d(grid, key=jax.random.PRNGKey(seed=seed))
-        y0 = jnp.fft.irfft2(y0, axes=(0, 1))
-    else:
-        xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
-        σx, σy = lx / 10, ly / 10
-        n = jnp.exp(
-            -(jnp.square((xv - lx/2) / σx) + jnp.square((yv - ly/2) / σy))
-        ) * 1e-2
-        Ω = jnp.zeros(grid.shape)
-        Ω, n = [χ.at[nz].set(rhs) for χ in (Ω, n)]
-        y0 = jnp.stack([Ω, n], axis=-1)
-
     diff_matrix_kwargs = {
         "grid": grid,
         "acc": acc,
@@ -1355,6 +1446,19 @@ def hasegawa_wakatani_finite_difference_2D(
 
     # print("computing the pseudo-inverse: very slow !")
     # laplacian_inv = jnp.linalg.pinv(laplacian_bcoo.todense(), hermitian=True)
+
+    if bc_name == "periodic":
+        y0 = init_hw_spectral_2d(grid, key=jax.random.PRNGKey(seed=seed), n=2)
+        y0 = jnp.fft.irfft2(y0, axes=(0, 1))
+    else:
+        xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
+        σx, σy = lx / 10, ly / 10
+        n = jnp.exp(
+            -(jnp.square((xv - lx/2) / σx) + jnp.square((yv - ly/2) / σy))
+        ) * 1e-2
+        Ω = jnp.zeros(grid.shape)
+        Ω, n = [χ.at[nz].set(rhs) for χ in (Ω, n)]
+        y0 = jnp.stack([Ω, n], axis=-1)
 
     def dx(y):
         return (dx_bcoo @ y.ravel()).reshape(nx, ny)
@@ -1465,18 +1569,14 @@ def main():
         model = [k for k in schemes if k in yaml_data][0]
         simulation, post_process = schemes[model]
         simulation_kwargs = {
-            "filename": p.with_suffix(".nc")
+            "filename": p.with_suffix(".zarr")
         } | yaml_data[model]
 
         simulation(**simulation_kwargs)
         post_process(simulation_kwargs["filename"])
 
-    elif p.is_dir():
-        filename = p / "HasegawaWakataniSpectral2D.nc"
-        hasegawa_wakatani_spectral_2D(filename=filename)
-        anim_hw_spectral(filename)
-    elif p.suffix == ".nc":
-        with xr.open_dataarray(p, engine="h5netcdf") as da:
+    elif p.suffix == ".zarr":
+        with xr.open_dataarray(p, engine="zarr") as da:
             simulation_kwargs = da.load().attrs
             model = simulation_kwargs.pop("model")
 
@@ -1496,7 +1596,12 @@ def main():
             post_process(p)
         else:  # plotting only
             post_process(p)
+    elif p.is_dir():
+        filename = p / "HasegawaWakataniSpectral2D.zarr"
+        hasegawa_wakatani_spectral_2D(filename=filename)
+        visualization_2D(filename)
 
 
 if __name__ == "__main__":
+
     main()

@@ -15,18 +15,18 @@ hasegawa_wakatani_spectral_2D:
 ```python
 python main.py path_to_yaml_file.yaml
 ```
-It will create a `.nc` file and plot the simulation in the same folder as the yaml file
+It will create a `.zarr` file and plot the simulation in the same folder as the yaml file
 
-## To plot from an existing `.nc` file
+## To plot from an existing `.zarr` file
 ```python
-python main.py path_to_nc_file.nc
+python main.py path_to_zarr_file.zarr
 ```
 
 ## To resume a simulation
 Increase the parameter `tf` in the yaml file and call again with the yaml file.
 Otherwise use the command:
 ```python
-python main.py path_to_nc_file.nc --tf 1000
+python main.py path_to_zarr_file.zarr --tf 1000
 ```
 
 # Available models
