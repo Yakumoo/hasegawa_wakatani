@@ -24,12 +24,13 @@ python main.py path_to_zarr_file.zarr
 
 ## To resume a simulation
 Increase the parameter `tf` in the yaml file and call again with the yaml file.
-Otherwise use the command:
+Otherwise use the command (change the value as you like):
 ```python
 python main.py path_to_zarr_file.zarr --tf 1000
 ```
 
 # Available models
+- `hasegawa_mima_spectral_2D`: Hasegawa-Mima equation with pseudo-spectral method in 2D with forcing/injection
 - `hasegawa_wakatani_spectral_2D`: Pseudo-spectral method in 2D (periodic)
 - `hasegawa_wakatani_spectral_1D`: Pseudo-spectral method with a single poloïdal mode, it uses `hasegawa_wakatani_spectral_2D`
 - `hasegawa_wakatani_finite_difference_2D`: Finite-difference method in 2D (periodic, Dirichlet, Neumann)
