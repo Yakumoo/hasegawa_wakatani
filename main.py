@@ -51,7 +51,6 @@ from diffrax import (
     AbstractWrappedSolver,
     NewtonNonlinearSolver,
     AbstractNonlinearSolver,
-    AbstractImplicitSolver,
     AbstractAdaptiveSolver,
     AbstractTerm,
     KenCarp5,
@@ -93,32 +92,27 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
     κ: float = 1
 
     def __post_init__(self):
-        self.kx, self.ky = rfft_mesh(self.grid)
+        filter = brick_wall_filter_2d(self.grid)
+        ks = rfft_mesh(self.grid)
+        self.kx, self.ky = ks * filter
         kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
-        self.ksq = kx2 + ky2
-        self.ksq_div = self.ksq.at[0, 0].set(1)  # use this one for division
+        self.k2 = kx2 + ky2
+        # use this one for division
+        self.k2_div = jnp.square(ks).sum(0).at[0, 0].set(1)
 
-        npx, npy = self.grid.shape
-        self.nx, self.ny = int(npx / 3) * 2, npy//3 + 1
-        self.filter_ = brick_wall_filter_2d(self.grid)
-        self.mask = self.filter_.astype(bool)
-
-        self.kx *= self.filter_
-        self.ky *= self.filter_
-
-        self.linear_term = jnp.empty((*self.ksq.shape, 2, 2), dtype=complex)
+        self.linear_term = jnp.empty((*self.k2.shape, 2, 2), dtype=complex)
         self.linear_term = (
             self.linear_term.at[:, :, 0, 0].set(
-                -self.C / self.ksq_div - self.νx * kx2 - self.νy * ky2
+                -self.C / self.k2_div - self.νx * kx2 - self.νy * ky2
             )
-            .at[:, :, 0, 1].set(self.C / self.ksq_div)
+            .at[:, :, 0, 1].set(self.C / self.k2_div)
             .at[:, :, 1, 0].set(-1j * self.ky * self.κ + self.C)
             .at[:, :, 1, 1].set(-self.C - self.Dx * kx2 - self.Dy * ky2)
             # zonal flows
-            .at[:, 0, 0, 0].set(-self.νz * self.ksq[:, 0])
+            .at[:, 0, 0, 0].set(-self.νz * self.k2[:, 0])
             .at[:, 0, 0, 1].set(0)
             .at[:, 0, 1, 0].set(0)
-            .at[:, 0, 1, 1].set(-self.Dz * self.ksq[:, 0])
+            .at[:, 0, 1, 1].set(-self.Dz * self.k2[:, 0])
         ) # yapf: disable
         self.linear_term = make_hermitian(self.linear_term)
 
@@ -131,8 +125,8 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
                 self.ky * φh,
                 self.kx * nh,
                 self.ky * nh,
-                -self.kx * self.ksq * φh,
-                -self.ky * self.ksq * φh,
+                -self.kx * self.k2 * φh,
+                -self.ky * self.k2 * φh,
             ]),
             axes=(1, 2),
         )
@@ -141,7 +135,7 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
             jnp.array([dφdx * dndy - dφdy * dndx, dφdx * dωdy - dφdy * dωdx]),
             axes=(1, 2),
         )
-        term = make_hermitian(jnp.stack((dφh / self.ksq_div, -dnh), axis=-1))
+        term = make_hermitian(jnp.stack((dφh / self.k2_div, -dnh), axis=-1))
 
         return term.view(dtype=float)
 
@@ -182,13 +176,11 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         self.k2 = kx2 + ky2
         νk = -(self.ν * self.k2).at[:, 0].set(self.νz * self.k2[:, 0])
         self.linear = νk - 1j * self.ky * self.κ / (1 + self.k2)
-        self.forcing = (
-            #jnp.zeros_like(kx2).at[:, pos].set(self.force_value)
-            jnp.exp(
-                -(kx2 + jnp.square(self.ky - self.force_ky)) / 2
-                / jnp.square(self.force_σ)
-            ) * self.force_amplitude * filter
-        )
+        self.forcing = jnp.exp(
+            -(kx2 + jnp.square(self.ky - self.force_ky)) / 2
+            / jnp.square(self.force_σ)
+        ) * self.force_amplitude * filter
+
         self.key = jax.random.PRNGKey(seed=self.seed)
 
     def explicit_terms(self, ŷ):
@@ -205,6 +197,7 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         )
         # Poisson bracket
         dφh = jnp.fft.rfft2(dφdx * (dφdy-dωdy) - dφdy * (dφdx-dωdx))
+
         self.key, subkey = jax.random.split(self.key)
         phase = jax.random.uniform(subkey, shape=φh.shape)
         phase = jnp.exp(2j * jnp.pi * phase)
@@ -295,24 +288,11 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
 
     term_structure = (AbstractTerm, AbstractTerm, AbstractTerm)
     interpolation_cls = diffrax.LocalLinearInterpolation
-    alphas = jnp.array([
-        0,
-        0.1496590219993,
-        0.3704009573644,
-        0.6222557631345,
-        0.9582821306748,
-        1
-    ])
-    betas = jnp.array([
-        0, -0.4178904745, -1.192151694643, -1.697784692471, -1.514183444257
-    ])
-    gammas = jnp.array([
-        0.1496590219993,
-        0.3792103129999,
-        0.8229550293869,
-        0.6994504559488,
-        0.1530572479681,
-    ])
+    # yapf: disable
+    alphas = jnp.array([0, 0.1496590219993, 0.3704009573644, 0.6222557631345, 0.9582821306748, 1])
+    betas = jnp.array([0, -0.4178904745, -1.192151694643, -1.697784692471, -1.514183444257])
+    gammas = jnp.array([0.1496590219993, 0.3792103129999, 0.8229550293869, 0.6994504559488, 0.1530572479681])
+    # yapf: enable
 
     def init(self, terms, t0, t1, y0, args):
         self.μdt = jnp.diff(self.alphas) / 2  # precompute the diff
@@ -386,23 +366,24 @@ def unpad(y, grid, axes=(-2, -1)):
 
 
 def init_hw_spectral_2d(grid, key, n=1, A=1e-4, σ=0.5):
-    """
-    Create the 2 initial fields in the fourier space:
-    electric potential and density
-    n: nb of fields
-    if unpad=True, remove the padding (smaller shape)
+    """Create the initial fields in the fourier space
+    
+    Args:
+        grid: Grid object with the padding shape
+        key: for creating the random fields
+        n: the number of fields
+        A: amplitude of the gaussian
+        σ: standard deviation of the gaussian
 
-    return: array of shape (grid_x, grid_y // 2 + 1, 2)
+    Return:
+        array of shape (grid_x, grid_y // 2 + 1) + ((n,) if n>1 else tuple())
     """
     kx, ky = rfft_mesh(grid)
     ŷ0 = A * jnp.exp(
-        -(jnp.square(kx) + jnp.square(ky)) / 2 / jnp.square(σ)
-        + 1j * jax.random.uniform(key, kx.shape, maxval=2 * jnp.pi)
-    )
+        -(jnp.square(kx) + jnp.square(ky))[..., None] / 2 / jnp.square(σ)
+        + 2j * jnp.pi * jax.random.uniform(key, kx.shape + (n, ))
+    ).squeeze()
     ŷ0 = make_hermitian(ŷ0)
-
-    if n > 1:
-        ŷ0 = jnp.tile(ŷ0[..., None], reps=(1, n))
 
     return ŷ0
 
@@ -1418,13 +1399,9 @@ def simulation_base(
         xr.DataArray(
             data=jnp.array([]).reshape(-1, *y_dummy.shape[1:]),
             dims=dims,
-            coords={
-                "time": []
-            } | coords,
+            coords={"time": []} | coords,
             attrs=attrs_,
-        ).to_zarr(
-            file_path, mode="w"
-        )
+        ).to_zarr(file_path, mode="w" ) # yapf: disable
 
         runtime_old = 0
         t0 = 0

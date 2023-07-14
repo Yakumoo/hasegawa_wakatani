@@ -15,7 +15,7 @@ hasegawa_wakatani_spectral_2D:
 ```python
 python main.py path_to_yaml_file.yaml
 ```
-It will create a `.zarr` file and plot the simulation in the same folder as the yaml file
+It will create a [`.zarr`](https://zarr.readthedocs.io) file and plot the simulation in the same folder as the yaml file
 
 ## To plot from an existing `.zarr` file
 ```python
