@@ -455,7 +455,7 @@ def hasegawa_mima_spectral_2D(
     ν=1e-3,
     νz=1e-5,
     κ=1,
-    force_amplitude=1e-5,
+    force_amplitude=1000,
     force_ky=1,
     filename=None,
     seed=42,
@@ -1414,7 +1414,7 @@ def simulation_base(
             print(f"{k:<20}: {v}")
 
     max_memory_will_use = (
-        video_nframes * jnp.prod(jnp.array(y0.shape)) * {
+        video_nframes * y0.size * {
             jnp.dtype("float64"): 8, jnp.dtype("float32"): 4
         }[y0.dtype]  # number of bytes
         * 2  # it seems it will be buffered twice ...
