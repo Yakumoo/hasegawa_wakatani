@@ -498,10 +498,10 @@ def hasegawa_mima_spectral_2D(
     video_fps: float = 20,
     atol: float = 1e-6,
     rtol: float = 1e-6,
-    ν: float = 1e-3,
+    ν: float = 1e-4,
     νz: float = 1e-5,
     κ: float = 1,
-    force_amplitude: float = 1e-2,
+    force_amplitude: float = 5e-3,
     force_ky: float = 1,
     filename: Union[str, Path] = None,
     seed: int = 42,
@@ -582,6 +582,26 @@ def hasegawa_wakatani_spectral_2D(
     seed: int = 42,
     solver: Union[str, type] = "Dopri8",
 ):
+    """Hasegawa-Wakatani pseudo-spectral 2D simulation
+
+    2/3 zero padding rule is used for computing the non-linear term to avoid
+    aliasing effects.
+
+    Args:
+        tf: final time simulation
+        grid_size: padded shape (Fourier space)
+        domain: box size (cartesian space)
+        video_length: length of the video (seconds)
+        video_fps: frames per second of the video
+        atol, rtol: absolute and relative tolerance
+        C: adiabatic parameter
+        κ: density gradient
+        Dx, Dy, Dz: diffusion coefficients (x, y and zonal)
+        νx, νy, νz: viscosity coefficients (x, y and zonal)
+        filename: path and name of the .zarr file
+        seed: seed for generating pseudo-random number key and for reproducibility
+        solver: the solver name passed to diffeqsolve
+    """
     npx, npy, lx, ly, grid = process_params_2D(grid_size, domain)
 
     Dy = Dy or Dx
@@ -728,7 +748,7 @@ def animation_2D(x, fields=["Ω", "n"]):
 
 
 def plot_time_frames_2D(filename, frames=[0, 0.25, 0.5, 1]):
-    """Plot 2D fileds at differents time frames"""
+    """Plot 2D fields at differents time frames"""
 
     da = open_with_vorticity(filename)
     second_field = "n" if "n" in da.coords["field"].values else "φ"
@@ -831,6 +851,12 @@ def hasegawa_wakatani_spectral_1D(
     solver: Union[str, type] = "Dopri8",
     ky: Optional[float] = None,
 ):
+    """Hasegawa-Wakatani pseudo-spectral 1D
+
+    Simple wrapper around `hasegawa_wakatani_spectral_2D`
+    This is the reduced model: with a unique single poloidal mode
+
+    """
 
     # take the first element if sized
     npx = grid_size[0] if hasattr(grid_size, "__len__") else grid_size
@@ -900,13 +926,45 @@ def open_with_vorticity(filename) -> xr.DataArray:
     return xr.concat((da, vorticity), dim="field")
 
 
+def last_1D_to_2D(filename):
+    """Project the single mode vorticity at last time step to 2D"""
+    file_path = Path(filename)
+    da = open_with_vorticity(filename)
+    nx = len(da.coords["x"].values)
+    Lx, Ly = da.attrs["domain"]
+    Ωk = jnp.fft.rfft2(jnp.array(da.isel(time=-1).sel(field="Ω")))
+    grid = grids.Grid((nx, nx), domain=((0, Lx), (0, Lx)))
+    kx_squared, ky_squared = rfft_mesh(grid)
+    ky_id = jnp.argmin(jnp.abs(ky_squared[0] - 2 * jnp.pi / Ly))
+    mask = jnp.zeros_like(kx_squared).at[:, 0].set(1).at[:, ky_id].set(1)
+    Ωk_squared = jnp.zeros_like(
+        kx_squared, dtype=complex
+    ).at[:, 0].set(Ωk[:, 0]).at[:, ky_id].set(Ωk[:, 1])
+    Ω = jnp.fft.irfft2(Ωk_squared)
+    fig, ax = plt.subplots(figsize=(3, 3))
+    ax.imshow(Ω.T, rasterized=True, cmap="seismic")
+    ax.set(
+        xticks=[],
+        yticks=[],
+        xlabel="x",
+        ylabel="y",
+        title=f"Ω, t={da.attrs['tf']}"
+    )
+    fig.tight_layout()
+    fig.savefig(
+        file_path.with_name(f"{file_path.stem}_1D_to_2D.pdf"),
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0
+    )
+
+
 def plot_spectral_1D(filename):
     """Plot the result of the single poloidal mode simulation
 
     time ↑
           -> x
     """
-
     da = open_with_vorticity(filename)
 
     # plot history
@@ -953,6 +1011,7 @@ def plot_spectral_1D(filename):
         attrs=da.attrs
     )
     plot_components_1D(da)
+    last_1D_to_2D(filename)
 
 
 def hw_growth_rate(ky, C, D, κ, ν):
@@ -1011,6 +1070,35 @@ def hasegawa_wakatani_finite_difference_1D(
     video_fps: float = 20,
     filename: Union[str, Path] = None,
 ):
+    """Hasegawa-Wakatani finite-difference 1D
+
+    Reduced model with a single poloidal mode using finite-difference method,
+    meaning that other than periodic boundary conditions are allowed.
+
+    Args:
+        tf: final time simulation
+        grid_size: number of divisions in x direction, the resolution
+            The relations with the pseudo-spectral method (zero padding):
+            grid_size_spectral = ceil(grid_size_findiff * 3 / 4) * 2
+            grid_size_findiff = int(grid_size_spectral / 3) * 2
+        domain: box size in x direction
+        video_length: length of the video (seconds)
+        video_fps: frames per second of the video
+        atol, rtol: absolute and relative tolerance
+        C: adiabatic parameter
+        κ: density gradient
+        Dx, Dy, Dz: diffusion coefficients (x, y and zonal)
+        νx, νy, νz: viscosity coefficients (x, y and zonal)
+        filename: path and name of the .zarr file
+        seed: seed for generating pseudo-random number key and for reproducibility
+        solver: the solver name passed to diffeqsolve
+        ky: value of the wave number of the poloidal mode
+            If not provided, the most unstable one is computed
+        boundary: boundary conditions of the left and right hand side of the domain
+            [periodic, dirichlet, neumann, force]
+            if force, neumann (left) and dirichlet (right) are used, κ is set to κ=0,
+            a particle flux source (left) is added to nb and consider to increase tf
+    """
     if ky is None:
         ky = find_ky(C=C, D=Dy, κ=κ, ν=νy)
 
@@ -1147,8 +1235,8 @@ def hasegawa_wakatani_finite_difference_1D(
         c_term = C * (φk-nk)
 
         return combine_state(
-            dΩk=-1j * ky * (dφbdx*Ωk - (dx_force@Ωb) * φk) + c_term + νx*ddx@Ωk - νy*ky2*Ωk,
-            dnk=-1j * ky * (dφbdx*nk + (κ - dx_force@nb) * φk) + c_term + Dx*ddx@nk - Dy*ky2*nk,
+            dΩk=c_term + νx*ddx@Ωk - νy*ky2*Ωk - 1j * ky * (dφbdx*Ωk - (dx_force@Ωb) * φk),
+            dnk=c_term + Dx*ddx@nk - Dy*ky2*nk - 1j * ky * (dφbdx*nk + (κ - dx_force@nb) * φk),
             dΩb=2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb,
             dnb=2 * ky * dx @ jnp.imag(φc * nk) + (Dz-well) * nb + forcing,
         ) # yapf: disable
@@ -1210,7 +1298,7 @@ def plot_components_1D(filename):
     """Plot the components 
 
     Plot Real(Xk) and Xb where X = Xb + Xk*exp(1j*ky*y) + conjugate(Xk)*exp(-1j*ky*y)
-    is the single polidal field
+    is the single poloidal field
     """
     if not isinstance(filename, xr.DataArray):
         with xr.open_dataarray(filename, engine="zarr") as da:
@@ -1536,7 +1624,7 @@ def diff_matrix(
     order: int,
     acc: int = 2,
     bc_name: str = "periodic",
-    bc_value: Union[int, float] = 0,
+    bc_value: float = 0,
     csr: bool = False
 ) -> tuple[Union[sparse.BCOO, sparse.BCSR], Optional[Array], Optional[Array]]:
     """Compute the differential matrix operator
@@ -1600,8 +1688,8 @@ def diff_matrix(
         bc = BoundaryConditions(shape=grid.shape)
         for i in range(len(grid.shape)):
             find = FinDiff(i, grid.step[i], 1, acc=acc)
-            nones = tuple([None] * i)
-            bc[nones + (0,)], bc[nones + (-1,)] = {
+            slices = tuple([slice(None)] * i)
+            bc[slices + (0,)], bc[slices + (-1,)] = {
                 "dirichlet": (bc_value, bc_value),
                 "neumann": ((find, bc_value), (find, bc_value)),
                 "force": ((find, 0), 1e-1),  # neumann ad dirichlet
@@ -1612,19 +1700,13 @@ def diff_matrix(
         op = op.matrix(shape=grid.shape)  # convert to scipy sparse
         op[nz, :] = bc.lhs[nz, :]  # apply boundary conditions
         # convert to jax sparse
-        if csr:
-            op = op.tocsr()
-            op = sparse.BCSR((op.data, op.indices, op.indptr), shape=op_shape)
-        else:
-            op = op.tocoo()
-            op = sparse.BCOO((op.data, jnp.stack([op.row, op.col], axis=-1)),
-                             shape=op_shape)
+        op = (sparse.BCSR if csr else sparse.BCOO).from_scipy_sparse(op)
     return op, nz, rhs
 
 
 def hasegawa_wakatani_finite_difference_2D(
     tf: float = 10,
-    grid_size: Union[int, tuple[int, int]] = 1024,
+    grid_size: Union[int, tuple[int, int]] = 128,
     domain: Union[float, tuple[float, float]] = 16 * jnp.pi,
     video_length: float = 10.0,
     video_fps: float = 20,
@@ -1636,7 +1718,7 @@ def hasegawa_wakatani_finite_difference_2D(
     Dz: float = 1e-2,
     ν: float = 1e-1,
     νz: float = 1e-2,
-    boundary="periodic",
+    boundary: Union[str, tuple[str, float]] = "periodic",
     acc: int = 2,
     seed: int = 42,
     solver: Union[str, type] = "Dopri8",
@@ -1658,53 +1740,64 @@ def hasegawa_wakatani_finite_difference_2D(
     dx_bcoo, nz, rhs = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
     dy_bcoo, nz, rhs = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
     laplacian_bcoo, nz, rhs = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
-    laplacian_csr, nz, rhs = diff_matrix(
-        axis=[0, 1], order=2, **diff_matrix_kwargs, csr=True
-    )
+    rhs = rhs.reshape(-1, 1)
 
     if bc_name == "periodic":
         y0 = init_hw_spectral_2d(grid, key=jax.random.PRNGKey(seed=seed), n=2)
         y0 = jnp.fft.irfft2(y0, axes=(0, 1))
     else:
         xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
-        σx, σy = lx / 10, ly / 10
+        σx, σy = lx / 100, ly / 100
         n = jnp.exp(
-            -(jnp.square((xv - lx/2) / σx) + jnp.square((yv - ly/2) / σy))
+            -(jnp.square((xv - lx/2) / σx) + jnp.square((yv - ly/2) / σy)) / 2
         ) * 1e-2
         Ω = jnp.zeros(grid.shape)
-        Ω, n = [χ.ravel().at[nz].set(rhs).reshape(nx, ny) for χ in (Ω, n)]
         y0 = jnp.stack([Ω, n], axis=-1)
+        y0 = y0.reshape(-1, 2).at[nz].set(rhs).reshape(nx, ny, 2)
 
     def dx(y):
-        return (dx_bcoo @ y.ravel()).reshape(nx, ny)
+        return (dx_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
 
     def dy(y):
-        return (dy_bcoo @ y.ravel()).reshape(nx, ny)
+        return (dy_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
 
     def laplacian(y):
-        return (laplacian_bcoo @ y.ravel()).reshape(nx, ny)
+        return (laplacian_bcoo
+                @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
 
-    def step(t, y, args):
+    def term(t, y, args):
+        if bc_name != "periodic":
+            y = y.reshape(-1, 2).at[nz].set(rhs).reshape(nx, ny, 2)
+
         Ω, n = y[..., 0], y[..., 1]
-        # φ = (laplacian_inv @ Ω.ravel()).reshape(nx, ny)
+
         φ = jax.scipy.sparse.linalg.cg(
-            lambda x: laplacian_bcoo @ x, Ω.ravel(), tol=rtol
+            jax.tree_util.Partial(sparse.sparsify(jnp.matmul), laplacian_bcoo),
+            Ω.ravel(),
+            tol=atol
         )[0].reshape(nx, ny)
-        # φ = sparse.linalg.spsolve(laplacian_csr.data, laplacian_csr.indices, laplacian_csr.indptr, Ω.ravel(), tol=atol).reshape(nx, ny)
-        Ωb, nb, φb = [jnp.mean(χ, axis=1) for χ in (Ω, n, φ)]
+
+        Ωnφ = jnp.array([Ω, n, φ])
+
+        Ωb, nb, φb = Ωnφ.mean(-1)
         Ωt, nt, φt = Ω - Ωb, n - nb, φ - φb
         c_term = C * (φt-nt)
+        dΩdx, dndx, dφdx = dx(Ωnφ)
+        dΩdy, dndy, dφdy = dy(Ωnφ)
 
-        dφdx = dx(φ)
-        dφdy = dy(φ)
+        term = jnp.stack([
+            dφdy*dΩdx - dφdx*dΩdy + c_term + ν * laplacian(Ωt) - νz*Ωb,
+            dφdy*dndx - dφdx*dndy + c_term + D * laplacian(nt) - Dz*nb - κ*dφdy
+        ], axis=-1)  # yapf: disable
 
-        dΩ = dφdy * dx(Ω) - dφdx * dy(Ω) + c_term + ν * laplacian(Ωt) - νz*Ωb
-        dn = dφdy * dx(n) - dφdx * dy(n) + c_term + D * laplacian(nt) - Dz*nb
-        dn -= κ * dφdy
-        return jnp.stack(arrays=[dΩ, dn], axis=-1)
+        if bc_name == "dirichlet":
+            # make sure the values at the boundaries don't change
+            term = term.reshape(-1, 2).at[nz].set(0).reshape(nx, ny, 2)
+
+        return term
 
     return simulation_base(
-        terms=ODETerm(step),
+        terms=ODETerm(term),
         tf=tf,
         coords={
             "x": jnp.linspace(0, lx, nx),

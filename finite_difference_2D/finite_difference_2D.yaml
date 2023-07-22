@@ -1,11 +1,12 @@
 hasegawa_wakatani_finite_difference_2D:
+  boundary: dirichlet
   grid_size: 128
   domain: 50
   D: 1.0e-1
   Dz: 1.0e-2
   ν: 1.0e-1 
   νz: 1.0e-2
-  atol: 1.0e-9
+  atol: 1.0e-10
   rtol: 1.0e-6
-  tf: 10
+  tf: 100
   video_length: 1
