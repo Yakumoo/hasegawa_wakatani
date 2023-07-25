@@ -110,10 +110,10 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
             .at[:, :, 1, 0].set(-1j * self.ky * self.κ + self.C)
             .at[:, :, 1, 1].set(-self.C - self.Dx * kx2 - self.Dy * ky2)
             # zonal flows
-            .at[:, 0, 0, 0].set(-self.νz * self.k2[:, 0])
+            .at[:, 0, 0, 0].set(-self.νz)
             .at[:, 0, 0, 1].set(0)
             .at[:, 0, 1, 0].set(0)
-            .at[:, 0, 1, 1].set(-self.Dz * self.k2[:, 0])
+            .at[:, 0, 1, 1].set(-self.Dz)
         ) # yapf: disable
         self.linear_term = make_hermitian(self.linear_term)
 
@@ -175,7 +175,7 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         self.kx, self.ky = rfft_mesh(self.grid) * filter_
         kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
         self.k2 = kx2 + ky2
-        νk = -(self.ν * self.k2).at[:, 0].set(self.νz * self.k2[:, 0])
+        νk = -(self.ν * self.k2).at[:, 0].set(self.νz)
         self.linear = νk - 1j * self.ky * self.κ / (1 + self.k2)
         self.forcing = jnp.exp(
             -(kx2 + jnp.square(self.ky - self.force_ky)) / 2
@@ -1482,7 +1482,7 @@ def simulation_base(
         apply: (to_diffeqsolve, to_dataarray). 
             When resuming a simulation: y0 = to_diffeqsolve(last_y)
             For converting to DataArray: to_dataarray(ys)
-            where ys has an additional leading time dimention
+            where ys has an additional leading time dimension
         filename: the output file name, expected to be a .zarr file
         split_callback: callback when the simulation is splitted
 
@@ -1549,7 +1549,7 @@ def simulation_base(
             dims=dims,
             coords={"time": []} | coords,
             attrs=attrs_,
-        ).to_zarr(file_path, mode="w" ) # yapf: disable
+        ).to_zarr(file_path, mode="w") # yapf: disable
 
         runtime_old = 0
         t0 = 0
