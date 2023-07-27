@@ -397,7 +397,9 @@ def init_hw_spectral_2d(
     key: KeyArray,
     n: int = 1,
     A: float = 1e-4,
-    σ: float = 0.5
+    σ: float = 0.5,
+    padding=True,
+    vorticity=False,
 ) -> Array:
     """Create the initial fields in the fourier space
     
@@ -411,12 +413,32 @@ def init_hw_spectral_2d(
     Return:
         array of shape (grid_x, grid_y // 2 + 1) + ((n,) if n>1 else tuple())
     """
-    kx, ky = rfft_mesh(grid)
+
+    if padding:
+        # we use the unpadded shape
+        unpadded_shape = (jnp.array(grid.shape) / 3).astype(int) * 2
+        unpadded_grid = grids.Grid(unpadded_shape, domain=grid.domain)
+    else:
+        unpadded_grid = grid
+
+    kx, ky = rfft_mesh(unpadded_grid)
+    k2 = jnp.square(kx) + jnp.square(ky)
     ŷ0 = A * jnp.exp(
-        -(jnp.square(kx) + jnp.square(ky))[..., None] / 2 / jnp.square(σ)
+        -k2[..., None] / 2 / jnp.square(σ)
         + 2j * jnp.pi * jax.random.uniform(key, kx.shape + (n, ))
-    ).squeeze()
-    ŷ0 = make_hermitian(ŷ0)
+    )
+
+    if vorticity:
+        ŷ0 = ŷ0.at[..., 0].set(-k2 * ŷ0[..., 0])
+
+    if padding:
+        # now we pad
+        filter_ = brick_wall_filter_2d(grid)
+        empty = jnp.tile(filter_[..., None], (1, 1, n)).astype(complex)
+        mask = filter_.astype(bool)
+        ŷ0 = empty.at[mask].set(ŷ0.reshape(-1, n))
+
+    ŷ0 = make_hermitian(ŷ0).squeeze()
 
     return ŷ0
 
@@ -522,9 +544,8 @@ def hasegawa_mima_spectral_2D(
         seed=seed,
     )
 
-    yh0 = (
-        init_hw_spectral_2d(grid=grid, key=jax.random.PRNGKey(seed=seed), n=1)
-        * brick_wall_filter_2d(grid)
+    yh0 = init_hw_spectral_2d(
+        grid=grid, key=jax.random.PRNGKey(seed=seed), n=1
     )
 
     # avoid tracer leak
@@ -614,9 +635,8 @@ def hasegawa_wakatani_spectral_2D(
         grid, C=C, Dx=Dx, Dy=Dy, Dz=Dz, νx=νx, νy=νy, νz=νz, κ=κ
     )
 
-    yh0 = (
-        init_hw_spectral_2d(grid=grid, key=jax.random.PRNGKey(seed=seed), n=2)
-        * brick_wall_filter_2d(grid)[..., None]
+    yh0 = init_hw_spectral_2d(
+        grid=grid, key=jax.random.PRNGKey(seed=seed), n=2
     )
 
     return simulation_base(
@@ -1148,15 +1168,11 @@ def hasegawa_wakatani_finite_difference_1D(
 
     def random_field_(key, A=1e-4, σ=0.5):
         """Initialize in the fourier space."""
-        grid_ = grids.Grid(
-            shape=(int(jnp.ceil(grid_size * 3 / 4) * 2), 6),
-            domain=[(0, domain), (0, 2 * jnp.pi / ky)]
+        grid_ = grids.Grid((grid_size, 4),
+                           domain=[(0, domain), (0, 2 * jnp.pi / ky)])
+        y = init_hw_spectral_2d(
+            grid_, key, n=2, A=A, σ=σ, padding=False, vorticity=True
         )
-        kxs, kys = rfft_mesh(grid_)
-        y = init_hw_spectral_2d(grid_, key, n=2, A=A, σ=σ)
-        #convert to Ω
-        y = y.at[..., 0].set(-y[..., 0] * (jnp.square(kxs) + jnp.square(kys)))
-        y = unpad(y, grid_, axes=(0, 1))
         y = jnp.fft.rfft(
             jnp.fft.irfft2(y, axes=(0, 1), norm="forward"), axis=1
         )
@@ -1238,9 +1254,8 @@ def hasegawa_wakatani_finite_difference_1D(
             dΩk=c_term + νx*ddx@Ωk - νy*ky2*Ωk - 1j * ky * (dφbdx*Ωk - (dx_force@Ωb) * φk),
             dnk=c_term + Dx*ddx@nk - Dy*ky2*nk - 1j * ky * (dφbdx*nk + (κ - dx_force@nb) * φk),
             dΩb=2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb,
-            dnb=2 * ky * dx @ jnp.imag(φc * nk) + (Dz-well) * nb + forcing,
+            dnb=2 * ky * dx @ jnp.imag(φc * nk) - (Dz+well) * nb + forcing,
         ) # yapf: disable
-
 
 
     def decompose(y):
@@ -1248,7 +1263,12 @@ def hasegawa_wakatani_finite_difference_1D(
         Ωk, nk, Ωb, nb = split_state(y)
         return jnp.stack(
             arrays=[
-                jnp.real(Ωk), jnp.imag(Ωk), jnp.real(nk), jnp.imag(nk), Ωb, nb
+                jnp.real(Ωk),
+                jnp.imag(Ωk),
+                jnp.real(nk),
+                jnp.imag(nk),
+                Ωb,
+                nb,
             ],
             axis=1
         )
@@ -1554,7 +1574,7 @@ def simulation_base(
         runtime_old = 0
         t0 = 0
         # the number of frames saved is video_nframes, it is not proportional to tf
-        time_linspace = jnp.linspace(t0, tf, video_nframes)
+        time_linspace = jnp.linspace(t0, tf, video_nframes + 1)
 
     for k, v in attrs_.items():
         # print only short parameters
@@ -1649,6 +1669,8 @@ def diff_matrix(
         nz: indices where the constraint must be applied on the state, None if periodic
         rhs: values of the constraint of the state, None if periodic
     """
+    assert acc < min(grid.shape) / 2, f"acc={acc} is too big. The grid.shape is {grid.shape}."
+
     if isinstance(axis, int):
         op = FinDiff(axis, grid.step[axis], order, acc=acc)
     else:
@@ -1740,12 +1762,18 @@ def hasegawa_wakatani_finite_difference_2D(
     dx_bcoo, nz, rhs = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
     dy_bcoo, nz, rhs = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
     laplacian_bcoo, nz, rhs = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
-    rhs = rhs.reshape(-1, 1)
 
     if bc_name == "periodic":
-        y0 = init_hw_spectral_2d(grid, key=jax.random.PRNGKey(seed=seed), n=2)
-        y0 = jnp.fft.irfft2(y0, axes=(0, 1))
+        y0 = init_hw_spectral_2d(
+            grid,
+            key=jax.random.PRNGKey(seed=seed),
+            n=2,
+            padding=False,
+            vorticity=True
+        )
+        y0 = jnp.fft.irfft2(y0, axes=(0, 1), norm="forward")
     else:
+        rhs = rhs.reshape(-1, 1)
         xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
         σx, σy = lx / 100, ly / 100
         n = jnp.exp(
@@ -1779,15 +1807,15 @@ def hasegawa_wakatani_finite_difference_2D(
 
         Ωnφ = jnp.array([Ω, n, φ])
 
-        Ωb, nb, φb = Ωnφ.mean(-1)
+        Ωb, nb, φb = Ωnφ.mean(-1, keepdims=True)
         Ωt, nt, φt = Ω - Ωb, n - nb, φ - φb
         c_term = C * (φt-nt)
         dΩdx, dndx, dφdx = dx(Ωnφ)
         dΩdy, dndy, dφdy = dy(Ωnφ)
 
         term = jnp.stack([
-            dφdy*dΩdx - dφdx*dΩdy + c_term + ν * laplacian(Ωt) - νz*Ωb,
-            dφdy*dndx - dφdx*dndy + c_term + D * laplacian(nt) - Dz*nb - κ*dφdy
+            c_term + ν * laplacian(Ωt) - νz*Ωb - dφdx*dΩdy + dφdy*dΩdx,
+            c_term + D * laplacian(nt) - Dz*nb - dφdx*dndy + dφdy*(dndx - κ)
         ], axis=-1)  # yapf: disable
 
         if bc_name == "dirichlet":
@@ -1829,6 +1857,153 @@ def hasegawa_wakatani_finite_difference_2D(
     )
 
 
+def hasegawa_wakatani_spectral_single_poloidal_mode(
+    C: float = 1,
+    κ: float = 1,
+    Dx: float = 1e-4,
+    Dy: float = 1e-4,
+    Dz: float = 0,
+    νx: float = 1e-2,
+    νy: float = 1e-4,
+    νz: float = 0,
+    ky: float = None,
+    tf: float = 300,
+    domain: float = 16 * jnp.pi,
+    grid_size: int = 682,
+    atol: float = 1e-6,
+    rtol: float = 1e-6,
+    seed: int = 42,
+    solver: Union[str, type] = "Dopri8",
+    video_length: float = 10,
+    video_fps: float = 20,
+    filename: Union[str, Path] = None,
+):
+    ky = ky or find_ky(C=C, D=Dy, κ=κ, ν=νy)
+
+    grid = grids.Grid((grid_size, 6),
+                      domain=[(0, domain), (0, 2 * jnp.pi / ky)])
+    y0 = init_hw_spectral_2d(
+        grid, key=jax.random.PRNGKey(seed=seed), n=2, vorticity=True
+    )
+    y0 = jnp.fft.rfft(
+        jnp.fft.irfft2(y0, axes=(0, 1), norm="forward"),
+        axis=1,
+        norm="backward"
+    )
+    y0 = jnp.fft.fft(y0, axis=0, norm="forward")
+    y0 = jnp.stack([y0[:, 1, 0], y0[:, 1, 1], y0[:, 0, 0], y0[:, 0, 1]],
+                   axis=-1)
+
+    filter_ = brick_wall_filter_2d(grid)[:, 0]
+    kx = rfft_mesh(grid)[0, :, 0]
+    kx2 = jnp.square(kx)
+    ky2 = jnp.square(ky)
+    k2 = kx2 + ky2
+    kx *= filter_
+    ones = jnp.ones_like(kx)
+
+    linear = jnp.array([
+        [-C / k2 - νx*kx2 - νy*ky2, -C * ones, 0 * ones, 0 * ones],
+        [-C / k2 - 1j*ky*κ/k2, -C - Dx*kx2 - Dy*ky2, 0 * ones, 0 * ones],
+        [0 * ones, 0 * ones, -νz * ones, 0 * ones],
+        [0 * ones, 0 * ones, 0 * ones, -Dz * ones]
+    ]) * filter_[None, None] # yapf: disable
+    linear = jnp.moveaxis(linear, -1, 0)
+
+    def term(t, y, args):
+        y = y.view(dtype=complex)
+
+        Ωkh, nkh, Ωbh, nbh = jnp.moveaxis(y, -1, 0)
+        dφbdx, dΩbdx, dnbdx, φk, Ωk, nk = jnp.fft.ifft(jnp.array([
+            - 1j * kx * Ωbh / kx2.at[0].set(1),
+            1j * kx * Ωbh,
+            1j * kx * nbh,
+            - Ωkh / k2,
+            Ωkh,
+            nkh
+        ]), norm="forward")
+
+        dφbΩk, dΩbφk, dφbnk, dnbφκ, φcΩk, φcnk = jnp.fft.fft(jnp.array([
+            dφbdx * Ωk,
+            dΩbdx * φk,
+            dφbdx * nk,
+            dnbdx * φk,
+            jnp.conjugate(φk) * Ωk,
+            jnp.conjugate(φk) * nk
+        ]), norm="forward")
+
+        term = 1j * ky * jnp.stack(
+            arrays=[
+                dΩbφk - dφbΩk,
+                dnbφκ - dφbnk,
+                2 * kx * jnp.imag(φcΩk),
+                2 * kx * jnp.imag(φcnk),
+            ],
+            axis=-1
+        )
+
+        term += (linear @ y[..., None]).reshape(*y.shape)
+        term *= filter_[:, None]
+
+        return term.view(dtype=float)
+
+    def to_direct_space(y):
+        y = y.view(dtype=complex)
+        mask = brick_wall_filter_2d(grid)[:, 0].astype(bool)
+        unpadded_size = int(grid_size / 3) * 2
+        y = y[:, mask].reshape(-1, unpadded_size, 4)
+        y = jnp.fft.ifft(
+            y, axis=-2, norm="forward"
+        ) / grid_size * unpadded_size
+        Ωk, nk, Ωb, nb = jnp.moveaxis(y, -1, 0)
+        return jnp.stack(
+            arrays=[
+                jnp.real(Ωk),
+                jnp.imag(Ωk),
+                jnp.real(nk),
+                jnp.imag(nk),
+                jnp.real(Ωb),
+                jnp.real(nb)
+            ],
+            axis=2
+        )
+
+    def to_fourier_space(y):
+        raise NotImplementedError("delete the zarr file.")
+
+    return simulation_base(
+        terms=ODETerm(term),
+        tf=tf,
+        coords={
+            "x": jnp.linspace(0, domain, int(grid_size / 3) * 2),
+            "field": ["Ωk_real", "Ωk_imag", "nk_real", "nk_imag", "Ωb", "nb"],
+        },
+        attrs={
+            "model": "hasegawa_wakatani_spectral_single_poloidal_mode",
+            "grid_size": grid_size,
+            "domain": domain,
+            "C": C,
+            "κ": κ,
+            "Dx": Dx,
+            "Dy": Dy,
+            "Dz": Dz,
+            "νx": νx,
+            "νy": νy,
+            "νz": νz,
+            "ky": ky,
+            "seed": seed,
+        },
+        y0=y0.view(dtype=float),
+        solver=solver,
+        atol=atol,
+        rtol=rtol,
+        video_length=video_length,
+        video_fps=video_fps,
+        filename=filename,
+        apply=(to_fourier_space, to_direct_space)
+    )
+
+
 def main():
     schemes = {
         "hasegawa_mima_spectral_2D":
@@ -1841,6 +2016,8 @@ def main():
         (hasegawa_wakatani_finite_difference_1D, plot_components_1D),
         "hasegawa_wakatani_finite_difference_2D":
         (hasegawa_wakatani_finite_difference_2D, visualization_2D),
+        "hasegawa_wakatani_spectral_single_poloidal_mode":
+        (hasegawa_wakatani_spectral_single_poloidal_mode, plot_components_1D),
     }
 
     parser = ArgumentParser(
