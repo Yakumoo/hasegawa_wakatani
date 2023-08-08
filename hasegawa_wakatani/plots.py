@@ -10,16 +10,16 @@ import jax
 import jax.numpy as jnp
 import jax_cfd.base.grids as grids
 
-from utils import open_with_vorticity, gridmesh_from_da, rfft_mesh
+from utils import open_with_vorticity, gridmesh_from_da, rfft_mesh, append_total_1d
 
 
-def visualization_2D(filename):
-    plot_time_frames_2D(filename)
+def visualization_2d(filename):
+    plot_time_frames_2d(filename)
     plot_spectrum(filename)
-    return animation_2D(filename)
+    return animation_2d(filename)
 
 
-def animation_2D(x, fields=["Ω", "n"]):
+def animation_2d(x, fields=["Ω", "n"]):
     """Create a .mp4 video of the 2D simulation"""
 
     assert set(fields).issubset({"n", "φ", "Ω"})
@@ -96,7 +96,7 @@ def animation_2D(x, fields=["Ω", "n"]):
         fig.savefig(Path(x).with_name("last_frame.pdf"), dpi=100)
 
 
-def plot_time_frames_2D(filename, frames=[0, 0.25, 0.5, 1]):
+def plot_time_frames_2d(filename, frames=[0, 0.25, 0.5, 1]):
     """Plot 2D fields at differents time frames"""
 
     da = open_with_vorticity(filename)
@@ -178,7 +178,7 @@ def plot_spectrum(filenames, n_last_frames=100):
     )
 
 
-def last_1D_to_2D(filename):
+def last_1d_to_2d(filename):
     """Project the single mode vorticity at last time step to 2D"""
     file_path = Path(filename)
     da = open_with_vorticity(filename)
@@ -204,14 +204,14 @@ def last_1D_to_2D(filename):
     )
     fig.tight_layout()
     fig.savefig(
-        file_path.with_name(f"{file_path.stem}_1D_to_2D.pdf"),
+        file_path.with_name(f"{file_path.stem}_1d_to_2d.pdf"),
         dpi=200,
         bbox_inches="tight",
         pad_inches=0
     )
 
 
-def plot_history_1D(filename):
+def plot_history_1d(filename):
     """Plot the result of the single poloidal mode simulation
 
     time ↑
@@ -241,14 +241,14 @@ def plot_history_1D(filename):
     )
 
 
-def plot_spectral_1D(filename):
+def plot_pspectral_1d(filename):
     file_path = Path(filename)
-    plot_history_1D(file_path)
-    plot_components_1D(file_path.with_stem(f"{file_path.stem}_decomposed"))
-    last_1D_to_2D(file_path)
+    plot_history_1d(file_path)
+    plot_components_1d(file_path.with_stem(f"{file_path.stem}_decomposed"))
+    last_1d_to_2d(file_path)
 
 
-def plot_components_1D(filename, tlim=None, xlim=None):
+def plot_components_1d(filename, tlim=None, xlim=None):
     """Plot the components 
 
     Plot Real(Xk) and Xb where X = Xb + Xk*exp(1j*ky*y) + conjugate(Xk)*exp(-1j*ky*y)
@@ -261,94 +261,90 @@ def plot_components_1D(filename, tlim=None, xlim=None):
         da = filename
         filename = da.attrs["filename"]
 
+    file_path = Path(filename)
+
     if tlim is not None:
         da = da.sel(time=slice(*tlim))
     if xlim is not None:
         da = da.sel(x=slice(*xlim))
 
-    da = da.sel(field=["Ωk_real", "Ωb", "nk_real", "nb"]
-                ).transpose("field", ...)
-    Ωk, Ωb, nk, nb = jnp.array(da)
-
+    tf = da.coords["time"].values[-1]
     domain = da.attrs["domain"]
-    grid_size = da.attrs["grid_size"]
-    tf = da.attrs["tf"]
-    κ = da.attrs["κ"]
     boundary = da.attrs.get("boundary", "periodic").split()
     x = da.coords["x"].values
 
-    nrows = 2
-    ncolumns = 3
-    fig, axes = plt.subplots(nrows, ncolumns, figsize=(7, 4))
-
-    for i, (k, v) in enumerate({
-            "Real($\Omega_k$)": Ωk,
-            "$\overline{\Omega}$": Ωb,
-            "$\Omega$": Ωb + 2*Ωk,
-            "Real($n_k$)": nk,
-            "$\overline{n}$": nb,
-            "$n$": nb + 2*nk,
-    }.items()):
-        ax = axes.ravel()[i]
-        vmax = jnp.maximum(jnp.abs(v.min()), v.max())
-        im = ax.pcolormesh(
-            x,
-            da.coords["time"].values,
-            v,
-            cmap="seismic",
-            vmin=-vmax,
-            vmax=vmax,
-            rasterized=True,
-        )
-        fig.colorbar(
-            im,
-            ax=ax,
-            location="right",
-            cax=ax.inset_axes([1.04, 0, 0.02, 1]),
-        ).formatter.set_powerlimits((0, 0))
-
-        ax_settings = {"title": k}
-
-        if i // (ncolumns) == nrows - 1:
-            ax_settings["xlabel"] = "x"
-        else:
-            ax_settings["xticks"] = []
-
-        if i % ncolumns == 0:
-            ax_settings["ylabel"] = "time"
-        else:
-            ax_settings["yticks"] = []
-
-        ax.set(**ax_settings)
-
+    g = append_total_1d(da).plot.pcolormesh(
+        x="x",
+        y="time",
+        col="field",
+        col_wrap=3,
+        rasterized=True,
+        vmax=abs(da.sel(field="Ωb")).max(),
+        cmap="seismic"
+    )
     if boundary[0] == "force":
+        ax = g.axs.flat[-2]
         forcing = (
             jnp.exp(-jnp.square((x - 0.1*domain) / (domain/10)))
             * float(boundary[1])
         )
         forcing -= forcing[::-1]  # show the well
-        ax = axes.ravel()[4].twinx()
+        forcing -= forcing.min()
+        forcing *= tf / forcing.max()
         ax.plot(x, forcing, label="source")
-        ax.set(yticks=[])
         ax.legend(fontsize="small")
 
-    ax = axes.ravel()[5].twinx()
-    n_profil = da.isel(time=-1)
+    ax = g.axs.flat[-1]
     n_profil = (
-        n_profil.sel(field="nb") + 2 * n_profil.sel(field="nk_real") + κ *
-        (domain-x)
+        g.data.isel(time=-1).sel(field="n") + da.attrs["κ"] * (domain-x)
     )
+    n_profil -= n_profil.min()
+    n_profil *= tf / n_profil.max()
     ax.plot(x, n_profil, label="profile")
-    ax.set(yticks=[])
-    ax.legend(fontsize="small")
+    ax.legend(fontsize="small", loc="lower left")
 
-    fig.tight_layout()
-    file_path = Path(filename)
-    fig.savefig(
-        file_path.with_name(f"{file_path.stem}.pdf"),
-        dpi=200,
+    g.fig.savefig(
+        file_path.with_suffix(".pdf"),
+        dpi=100,
+        bbox_inches="tight",
+        pad_inches=0
+    )
+    return g
+
+
+def pcolor_compare_1d(da, directory):
+    g = append_total_1d(da).plot.pcolormesh(
+        x="x",
+        y="time",
+        row="method",
+        col="field",
+        rasterized=True,
+        vmax=abs(da.sel(field="Ωb")).max(),
+        cmap="seismic"
+    )
+    g.fig.savefig(
+        Path(directory) / "compare_1d_pcolor.pdf",
+        dpi=100,
         bbox_inches="tight",
         pad_inches=0
     )
 
-    return Ωk, nk, Ωb, nb
+
+def plot_profiles_compare_1d(da, directory, ts=None):
+    if ts is None:
+        ts = jnp.linspace(0, da.attrs["tf"], 5)[1:]
+    g = append_total_1d(da).sel(
+        time=ts, method="nearest"
+    ).drop_sel(field=["Ω", "n"]).plot.line(
+        x="x",
+        hue="method",
+        row="field",
+        col="time",
+        sharey=False,
+        linestyle=(0, (5, 1)),
+    )
+    g.fig.savefig(
+        Path(directory) / "compare_1d_profiles.pdf",
+        bbox_inches="tight",
+        pad_inches=0
+    )

@@ -15,17 +15,18 @@ from diffrax import ODETerm
 from utils import (
     brick_wall_filter_2d,
     make_hermitian,
-    init_fields_fourier_2D,
-    process_params_2D,
+    init_fields_fourier_2d,
+    process_params_2d,
     process_boundary,
-    to_direct_space,
-    to_fourier_space,
+    fourier_to_real,
+    real_to_fourier,
     get_terms,
     rfft_mesh,
     find_ky,
     simulation_base,
     diff_matrix,
     open_with_vorticity,
+    get_padded_shape,
 )
 
 
@@ -53,8 +54,11 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
     κ: float = 1
 
     def __post_init__(self):
-        filter_ = brick_wall_filter_2d(self.grid, nyquist=True)
-        ks = rfft_mesh(self.grid)
+        padded_grid = grids.Grid(
+            shape=get_padded_shape(self.grid.shape), domain=self.grid.domain
+        )
+        filter_ = brick_wall_filter_2d(*self.grid.shape, nyquist=True)
+        ks = rfft_mesh(padded_grid)
         self.kx, self.ky = ks * filter_
         kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
         self.k2 = kx2 + ky2
@@ -133,9 +137,11 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
     seed: int
 
     def __post_init__(self):
-
-        filter_ = brick_wall_filter_2d(self.grid, nyquist=True)
-        self.kx, self.ky = rfft_mesh(self.grid) * filter_
+        padded_grid = grids.Grid(
+            shape=get_padded_shape(self.grid.shape), domain=self.grid.domain
+        )
+        filter_ = brick_wall_filter_2d(*self.grid.shape, nyquist=True)
+        self.kx, self.ky = rfft_mesh(padded_grid) * filter_
         kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
         self.k2 = kx2 + ky2
         νk = -(self.ν * self.k2).at[:, 0].set(self.νz)
@@ -181,7 +187,7 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         return term.view(dtype=float)
 
 
-def hasegawa_mima_spectral_2D(
+def hasegawa_mima_pspectral_2d(
     tf: float = 10,
     grid_size: Union[int, tuple[int, int]] = 1024,
     domain: Union[float, tuple[float, float]] = 16 * jnp.pi,
@@ -198,7 +204,7 @@ def hasegawa_mima_spectral_2D(
     seed: int = 42,
     solver: Union[str, type] = "Dopri8",
 ):
-    nx, ny, lx, ly, grid = process_params_2D(grid_size, domain, padding=True)
+    nx, ny, lx, ly, grid = process_params_2d(grid_size, domain)
 
     κ, ν, νz = [x.item() if hasattr(x, "item") else x for x in (κ, ν, νz)]
 
@@ -213,7 +219,7 @@ def hasegawa_mima_spectral_2D(
         seed=seed,
     )
 
-    yh0 = init_fields_fourier_2D(
+    yh0 = init_fields_fourier_2d(
         grid=grid, key=jax.random.PRNGKey(seed=seed), n=1
     )
 
@@ -230,7 +236,7 @@ def hasegawa_mima_spectral_2D(
             "field": ["φ"],
         },
         attrs={
-            "model": "hasegawa_mima_spectral_2D",
+            "model": "hasegawa_mima_pspectral_2d",
             "grid_size": (nx, ny),
             "domain": (lx, ly),
             "ν": ν,
@@ -247,12 +253,12 @@ def hasegawa_mima_spectral_2D(
         video_length=video_length,
         video_fps=video_fps,
         filename=filename,
-        apply=(to_fourier_space(grid), to_direct_space(grid)),
+        apply=(real_to_fourier, fourier_to_real),
         split_callback=split_callback,
     )
 
 
-def hasegawa_wakatani_spectral_2D(
+def hasegawa_wakatani_pspectral_2d(
     tf: float = 10,
     grid_size: Union[int, tuple[int, int]] = 1024,
     domain: Union[float, tuple[float, float]] = 16 * jnp.pi,
@@ -293,7 +299,7 @@ def hasegawa_wakatani_spectral_2D(
         seed: seed for generating pseudo-random number key and for reproducibility
         solver: the solver name passed to diffeqsolve
     """
-    nx, ny, lx, ly, grid = process_params_2D(grid_size, domain, padding=True)
+    nx, ny, lx, ly, grid = process_params_2d(grid_size, domain)
 
     Dy = Dy or Dx
     νy = νy or νx
@@ -305,7 +311,7 @@ def hasegawa_wakatani_spectral_2D(
         grid, C=C, Dx=Dx, Dy=Dy, Dz=Dz, νx=νx, νy=νy, νz=νz, κ=κ
     )
 
-    yh0 = init_fields_fourier_2D(
+    yh0 = init_fields_fourier_2d(
         grid=grid, key=jax.random.PRNGKey(seed=seed), n=2
     )
 
@@ -318,7 +324,7 @@ def hasegawa_wakatani_spectral_2D(
             "field": ["φ", "n"],
         },
         attrs={
-            "model": f"hasegawa_wakatani_spectral_{'1' if ny == 4 else '2'}D",
+            "model": f"hasegawa_wakatani_pspectral_{'1' if ny == 4 else '2'}d",
             "grid_size": (nx, ny),
             "domain": (lx, ly),
             "C": C,
@@ -338,11 +344,11 @@ def hasegawa_wakatani_spectral_2D(
         video_length=video_length,
         video_fps=video_fps,
         filename=filename,
-        apply=(to_fourier_space(grid), to_direct_space(grid)),
+        apply=(real_to_fourier, fourier_to_real),
     )
 
 
-def hasegawa_wakatani_spectral_1D(
+def hasegawa_wakatani_pspectral_1d(
     tf: float = 10,
     grid_size: int = 1024,
     domain: float = 16 * jnp.pi,
@@ -365,7 +371,7 @@ def hasegawa_wakatani_spectral_1D(
 ):
     """Hasegawa-Wakatani pseudo-spectral 1D
 
-    Simple wrapper around `hasegawa_wakatani_spectral_2D`
+    Simple wrapper around `hasegawa_wakatani_pspectral_2d`
     This is the reduced model: with a unique single poloidal mode
 
     """
@@ -381,7 +387,7 @@ def hasegawa_wakatani_spectral_1D(
 
     ky = ky or find_ky(C=C, D=Dy, κ=κ, ν=νy)
 
-    da_2D = hasegawa_wakatani_spectral_2D(
+    da_2d = hasegawa_wakatani_pspectral_2d(
         tf=tf,
         grid_size=(npx, 4),
         domain=(lx, 2 * jnp.pi / ky),
@@ -436,10 +442,10 @@ def hasegawa_wakatani_spectral_1D(
         file_path.with_name(f"{file_path.stem}_decomposed.zarr"), mode="w"
     )
 
-    return da_2D
+    return da_2d
 
 
-def hasegawa_wakatani_finite_difference_1D(
+def hasegawa_wakatani_findiff_1d(
     C: float = 1,
     κ: float = 1,
     Dx: float = 1e-4,
@@ -470,9 +476,6 @@ def hasegawa_wakatani_finite_difference_1D(
     Args:
         tf: final time simulation
         grid_size: number of divisions in x direction, the resolution
-            The relations with the pseudo-spectral method (zero padding):
-            grid_size_spectral = ceil(grid_size_findiff * 3 / 4) * 2
-            grid_size_findiff = int(grid_size_spectral / 3) * 2
         domain: box size in x direction
         video_length: length of the video (seconds)
         video_fps: frames per second of the video
@@ -517,7 +520,7 @@ def hasegawa_wakatani_finite_difference_1D(
         """Initialize in the fourier space."""
         grid_ = grids.Grid((grid_size, 4),
                            domain=[(0, domain), (0, 2 * jnp.pi / ky)])
-        y = init_fields_fourier_2D(
+        y = init_fields_fourier_2d(
             grid_, key, n=2, A=A, σ=σ, padding=False, laplacian=True
         )
         y = jnp.fft.ifft(y, axis=0, norm="forward")
@@ -531,6 +534,18 @@ def hasegawa_wakatani_finite_difference_1D(
             Ωk.view(dtype=float), nk.view(dtype=float), Ωb, nb
         ])
 
+    def combine_state(dΩk, dnk, dΩb, dnb):
+        return jnp.concatenate([
+            dΩk.view(dtype=float), dnk.view(dtype=float), dΩb, dnb
+        ])
+
+    def split_state(y):
+        Ωk = y[..., :2 * grid_size].view(dtype=complex)
+        nk = y[..., 2 * grid_size:4 * grid_size].view(dtype=complex)
+        Ωb = y[..., 4 * grid_size:5 * grid_size]
+        nb = y[..., 5 * grid_size:]
+        return Ωk, nk, Ωb, nb
+
     k1, k2 = jax.random.split(key)
     if bc_name == "force":
         dx, nz, rhs = diff_matrix(grid, axis=0, order=1, acc=acc, bc_name="dirichlet")
@@ -543,7 +558,7 @@ def hasegawa_wakatani_finite_difference_1D(
         forcing = jnp.exp(
             -jnp.square((x - 0.1*domain) / (domain/10))
         ) * bc_value
-        well = jnp.diag(forcing[::-1].at[-1].set(0))
+        well = forcing[::-1].at[-1].set(0)
         # buffering
         pad_size = int(grid_size * 0.05)
         pad = jnp.linspace(1, 100, pad_size)
@@ -551,7 +566,8 @@ def hasegawa_wakatani_finite_difference_1D(
             (pad[::-1], jnp.ones(grid_size - 2*pad_size), pad)
         )
         νx_, νy_, νz_, Dx_, Dy_ = [padded * χ for χ in (νx, νy, νz, Dx, Dy)]
-        y0 = jnp.zeros((6, grid_size))
+        y0 = init_fields(key)
+        y0 = combine_state(*[χ.at[nz].set(rhs) for χ in split_state(y0)])
     else:
         dx, nz, rhs = diff_matrix(
             grid, axis=0, order=1, acc=acc, bc_name=bc_name, bc_value=bc_value
@@ -568,18 +584,6 @@ def hasegawa_wakatani_finite_difference_1D(
         ddx.todense() - jnp.eye(grid_size) * ky2, hermitian=True
     )
     ddx_inv = jnp.linalg.pinv(ddx.todense(), hermitian=True)
-
-    def combine_state(dΩk, dnk, dΩb, dnb):
-        return jnp.concatenate([
-            dΩk.view(dtype=float), dnk.view(dtype=float), dΩb, dnb
-        ])
-
-    def split_state(y):
-        Ωk = y[..., :2 * grid_size].view(dtype=complex)
-        nk = y[..., 2 * grid_size:4 * grid_size].view(dtype=complex)
-        Ωb = y[..., 4 * grid_size:5 * grid_size]
-        nb = y[..., 5 * grid_size:]
-        return Ωk, nk, Ωb, nb
 
     def term(t, y, args):
         Ωk, nk, Ωb, nb = split_state(y)
@@ -628,7 +632,7 @@ def hasegawa_wakatani_finite_difference_1D(
             "x": x,
         },
         attrs={
-            "model": "hasegawa_wakatani_finite_difference_1D",
+            "model": "hasegawa_wakatani_findiff_1d",
             "grid_size": grid_size,
             "domain": domain,
             "C": C,
@@ -655,7 +659,7 @@ def hasegawa_wakatani_finite_difference_1D(
     )
 
 
-def hasegawa_wakatani_finite_difference_2D(
+def hasegawa_wakatani_findiff_2d(
     tf: float = 10,
     grid_size: Union[int, tuple[int, int]] = 128,
     domain: Union[float, tuple[float, float]] = 16 * jnp.pi,
@@ -680,7 +684,7 @@ def hasegawa_wakatani_finite_difference_2D(
     ]
 
     bc_name, bc_value = process_boundary(boundary)
-    nx, ny, lx, ly, grid = process_params_2D(grid_size, domain)
+    nx, ny, lx, ly, grid = process_params_2d(grid_size, domain)
 
     diff_matrix_kwargs = {
         "grid": grid,
@@ -691,10 +695,10 @@ def hasegawa_wakatani_finite_difference_2D(
     dx_bcoo, nz, rhs = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
     dy_bcoo, nz, rhs = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
     Δ_bcoo, nz, rhs = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
-    Δ_csr = sparse.BCSR.from_bcoo(Δ_bcoo)
+    Δ_matmul = jax.tree_util.Partial(sparse.sparsify(jnp.matmul), Δ_bcoo)
 
     if bc_name == "periodic":
-        y0 = init_fields_fourier_2D(
+        y0 = init_fields_fourier_2d(
             grid,
             key=jax.random.PRNGKey(seed=seed),
             n=2,
@@ -728,9 +732,9 @@ def hasegawa_wakatani_finite_difference_2D(
 
         Ω, n = y[..., 0], y[..., 1]
 
-        φ = sparse.linalg.spsolve(
-            Δ_csr.data, Δ_csr.indices, Δ_csr.indptr, Ω.ravel()
-        ).reshape(nx, ny)
+        φ = jax.scipy.sparse.linalg.cg(
+            Δ_matmul, Ω.ravel(), tol=rtol
+        )[0].reshape(nx, ny)
 
         Ωnφ = jnp.array([Ω, n, φ])
 
@@ -760,7 +764,7 @@ def hasegawa_wakatani_finite_difference_2D(
             "field": ["Ω", "n"],
         },
         attrs={
-            "model": "hasegawa_wakatani_finite_difference_2D",
+            "model": "hasegawa_wakatani_findiff_2d",
             "grid_size": (nx, ny),
             "domain": (lx, ly),
             "C": C,

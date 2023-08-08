@@ -3,6 +3,7 @@ from typing import Callable, Optional, Tuple, Union, Any, Sequence
 from timeit import default_timer as timer
 from pathlib import Path
 
+import numpy as np
 import scipy
 from findiff import FinDiff, BoundaryConditions
 import zarr
@@ -34,18 +35,25 @@ from diffrax import (
 import jax_cfd.base.grids as grids
 
 
-def brick_wall_filter_2d(grid: grids.Grid, nyquist=False):
+def get_padded_shape(shape):
+    padded_shape = jnp.array(shape) * 3 / 2
+    return jnp.where(
+        padded_shape % 2 == 0, padded_shape, jnp.ceil(padded_shape / 2) * 2
+    ).astype(int).tolist()
+
+
+def brick_wall_filter_2d(nx, ny, nyquist=False):
     """Implements the 2/3 rule."""
-    npx, npy = grid.shape
-    nx = npx // 3
+    npx, npy = get_padded_shape([nx, ny])
+    npx3 = npx // 3
     filter_ = jnp.zeros((npx, npy//2 + 1))
     if nyquist:
-        ny = npy // 3
-        filter_ = filter_.at[-nx + 1:, :ny].set(1)
+        npy3 = npy // 3
+        filter_ = filter_.at[-npx3 + 1:, :npy3].set(1)
     else:
-        ny = npy//3 + 1
-        filter_ = filter_.at[-nx:, :ny].set(1)
-    filter_ = filter_.at[:nx, :ny].set(1)
+        npy3 = npy//3 + 1
+        filter_ = filter_.at[-npx3:, :npy3].set(1)
+    filter_ = filter_.at[:npx3, :npy3].set(1)
 
     return filter_
 
@@ -196,9 +204,7 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
         return f1 + f2
 
 
-def unpad(
-    y: Array, grid: grids.Grid, axes: tuple[int, int] = (-2, -1)
-) -> Array:
+def unpad(y: Array, axes: tuple[int, int] = (-2, -1)) -> Array:
     """Unpad the Fourier space
     
     Remove the zero padding (2/3 rule). Thus, the final shape is smaller
@@ -211,10 +217,10 @@ def unpad(
     Return:
         the unpadded array of `y`
     """
-    npx, npy = grid.shape
+    npx, npy = y.shape[axes[0]], y.shape[axes[1]]
     nx = int(npx / 3) * 2
-    ny = npy//3 + 1
-    mask = brick_wall_filter_2d(grid).astype(bool)
+    ny = int(jnp.ceil(npy / 3 * 2))
+    mask = brick_wall_filter_2d(nx, ny).astype(bool)
     new_shape = list(y.shape)
     new_shape[axes[0]] = nx
     new_shape[axes[1]] = ny
@@ -224,7 +230,7 @@ def unpad(
     return y[tuple(index)].reshape(*new_shape)
 
 
-def init_fields_fourier_2D(
+def init_fields_fourier_2d(
     grid: grids.Grid,
     key: KeyArray,
     n: int = 1,
@@ -236,7 +242,7 @@ def init_fields_fourier_2D(
     """Create the initial fields in the fourier space
     
     Args:
-        grid: Grid object with the padding shape
+        grid: Grid object without the padding shape
         key: for creating the random fields
         n: the number of fields
         A: amplitude of the gaussian
@@ -246,14 +252,7 @@ def init_fields_fourier_2D(
         array of shape (grid_x, grid_y // 2 + 1) + ((n,) if n>1 else tuple())
     """
 
-    if padding:
-        # we use the unpadded shape
-        unpadded_shape = (jnp.array(grid.shape) / 3).astype(int) * 2
-        unpadded_grid = grids.Grid(unpadded_shape, domain=grid.domain)
-    else:
-        unpadded_grid = grid
-
-    kx, ky = rfft_mesh(unpadded_grid)
+    kx, ky = rfft_mesh(grid)
     k2 = jnp.square(kx) + jnp.square(ky)
     ŷ0 = A * jnp.exp(
         -k2[..., None] / 2 / jnp.square(σ)
@@ -265,17 +264,16 @@ def init_fields_fourier_2D(
 
     if padding:
         # now we pad
-        filter_ = brick_wall_filter_2d(grid)
-        empty = jnp.tile(filter_[..., None], (1, 1, n)).astype(complex)
-        mask = filter_.astype(bool)
-        ŷ0 = empty.at[mask].set(ŷ0.reshape(-1, n))
+        mask = brick_wall_filter_2d(*grid.shape)
+        empty = jnp.tile(mask[..., None], (1, 1, n)).astype(complex)
+        ŷ0 = empty.at[mask.astype(bool)].set(ŷ0.reshape(-1, n))
 
     ŷ0 = make_hermitian(ŷ0).squeeze()
 
     return ŷ0
 
 
-def process_params_2D(grid_size, domain, padding=False):
+def process_params_2d(grid_size, domain):
     if jnp.isscalar(domain):
         lx = jnp.array(domain).item()
         ly = lx
@@ -293,48 +291,34 @@ def process_params_2D(grid_size, domain, padding=False):
         jnp.array([nx, ny]).dtype, jnp.integer
     ), "grid_size must be 2 integers."
 
-    if padding:
-        shape = jnp.array([nx, ny]) * 3 / 2
-        npx, npy = jnp.where(shape % 2 == 0, shape, jnp.ceil(shape/2)*2).astype(int).tolist()
-    else:
-        npx, npy = nx, ny
-
-    grid = grids.Grid((npx, npy), domain=((0, lx), (0, ly)))
+    grid = grids.Grid((nx, ny), domain=((0, lx), (0, ly)))
 
     return nx, ny, lx, ly, grid
 
 
-def to_direct_space(grid: grids.Grid) -> Callable[[Array], Array]:
+def fourier_to_real(ŷ: Array) -> Array:
     """Convert the simulation data to direct space"""
 
-    def to_direct_space_(yh: Array):
-        # move to cpu to handle large data
-        y = jax.device_put(
-            yh, device=jax.devices("cpu")[0]
-        ).view(dtype=complex)
-        y = unpad(y, grid, axes=(1, 2))
-        y = jnp.fft.irfft2(y, axes=(1, 2), norm="forward")
-        nt, nx, ny = y.shape[:3]
-        return y.reshape(nt, nx, ny, -1)
-
-    return to_direct_space_
+    # move to cpu to handle large data
+    y = jax.device_put(ŷ, device=jax.devices("cpu")[0]).view(dtype=complex)
+    y = unpad(y, axes=(1, 2))
+    y = jnp.fft.irfft2(y, axes=(1, 2), norm="forward")
+    nt, nx, ny = y.shape[:3]
+    return y.reshape(nt, nx, ny, -1)
 
 
-def to_fourier_space(grid: grids.Grid) -> Callable[[Array], Array]:
+def real_to_fourier(y: Array) -> Array:
     """Convert the initial state to Fourier space"""
-
-    def to_fourier_space_(y: Array):
-        npx, npy = grid.shape
-        y0 = y.squeeze()
-        y = jnp.fft.rfft2(y0, axes=(0, 1), norm="forward")
-        return (  # padding
-            jnp.zeros((npx, npy // 2 + 1, 2), dtype=complex)
-            .at[brick_wall_filter_2d(grid).astype(bool)]
-            .set(y.reshape(-1, *y0.shape[2:]))
-            .view(dtype=float)
-        )
-
-    return to_fourier_space_
+    nx, ny = y.shape[:2]
+    npx, npy = get_padded_shape([nx, ny])
+    y0 = y.squeeze()
+    y = jnp.fft.rfft2(y0, axes=(0, 1), norm="forward")
+    return (  # padding
+        jnp.zeros((npx, npy // 2 + 1, 2), dtype=complex)
+        .at[brick_wall_filter_2d(nx, ny).astype(bool)]
+        .set(y.reshape(-1, *y0.shape[2:]))
+        .view(dtype=float)
+    )
 
 
 def get_terms(m, solver):
@@ -523,7 +507,7 @@ def simulation_base(
         video_length, video_fps: length (in seconds) and fps of the output saved.
             The total number of frames saved is video_length * video_fps
         apply: (to_diffeqsolve, to_dataarray). 
-            When resuming a simulation: y0 = to_diffeqsolve(last_y)
+            When resuming a simulation: y0 = to_diffeqsolve(ys[-1])
             For converting to DataArray: to_dataarray(ys)
             where ys has an additional leading time dimension
         filename: the output file name, expected to be a .zarr file
@@ -558,16 +542,12 @@ def simulation_base(
             da.attrs.update(zarr.open(file_path).attrs)
             # if all attrs are the same and tf is greater than the previous tf, it means we want to continue
             same = jnp.array([
-                (
-                    # jnp.array(v).shape == jnp.array(da.attrs[k]).shape and
-                    v == type(v)(da.attrs[k])
-                ) for (k, v) in attrs_.items() if (
-                    isinstance(v, (int, float, str, tuple,
-                                   list)) and k in da.attrs
-                )
+                np.array_equal(v, da.attrs[k]) for (k, v) in attrs_.items()
+                if k in da.attrs
             ]).all()
 
-            if tf > da.attrs.get("tf", float("inf")) and same:
+            if tf > da.attrs.get("tf", float("inf")) and len(da.coords["time"]
+                                                             ) > 0 and same:
                 t0 = da.attrs["tf"]
                 y0 = jnp.array(da.isel(time=-1))
                 runtime_old = da.attrs.get("runtime", 0)
@@ -601,7 +581,7 @@ def simulation_base(
 
     for k, v in attrs_.items():
         # print only short aparameters
-        if not (hasattr(v, "__len__") and len(v) > 10):
+        if isinstance(v, str) or not (hasattr(v, "__len__") and len(v) > 10):
             print(f"{k:<20}: {v}")
 
     max_memory_will_use = (
@@ -689,6 +669,7 @@ def diff_matrix(
         nz: indices where the constraint must be applied on the state, None if periodic
         rhs: values of the constraint of the state, None if periodic
     """
+    params = locals()
     assert acc < min(grid.shape) / 2, f"acc={acc} is too big. The grid.shape is {grid.shape}."
 
     if isinstance(axis, int):
@@ -703,8 +684,7 @@ def diff_matrix(
         op = op.matrix(grid.shape)[pos].toarray()
         row = jnp.roll(jnp.array(op), -pos).squeeze()
         indices = jnp.nonzero(row)[0]
-        data = row[indices]
-        data = jnp.tile(data, square_size)
+        data = jnp.tile(row[indices], square_size)
         ones = jnp.ones_like(indices)
         indices = jnp.concatenate(
             jax.vmap(
@@ -730,5 +710,54 @@ def diff_matrix(
 
         op = op.matrix(shape=grid.shape)  # convert to scipy sparse
         op[nz, :] = bc.lhs[nz, :]  # apply boundary conditions
+
+        # when using acc > 2 and a boundary condition, the matrix is strange at the edges
+        # we fix it using acc=2 at the edges only
+        if acc > 2:
+            params["acc"] = 2
+            op2, _, _ = diff_matrix(**params)
+            op2 = scipy.sparse.coo_matrix(
+                (op2.data, (op2.indices[:, 0], op2.indices[:, 1])),
+                shape=op2.shape
+            ).tolil()
+            pos = jnp.arange(square_size).reshape(grid.shape)
+            pos = pos[tuple([slice(acc // 2, -acc // 2)] * len(grid.shape))]
+            op2[pos, :] = op[pos, :]
+            op = op2
+
+        if hasattr(op, "eliminate_zeros"):
+            op.eliminate_zeros()
+
         op = sparse.BCOO.from_scipy_sparse(op)  # convert to jax sparse
     return op, nz, rhs
+
+
+def append_total_1d(da):
+    weights = {
+        "Ωk_real": 2,
+        "nk_real": 2,
+        "Ωb": 1,
+        "nb": 1,
+    }
+    das = [da] + [
+        da.sel(field=fields).weighted(
+            xr.DataArray([weights[f] for f in fields], coords={"field": fields})
+        )
+        .sum(dim="field")
+        .expand_dims(dim={"field": [fields[0][0]]})
+        for fields in [["Ωk_real", "Ωb"], ["nk_real", "nb"]]
+    ] # yapf: disable
+    return (
+        xr.concat(das, dim="field").sel(
+            field=["Ωk_real", "Ωb", "Ω", "nk_real", "nb", "n"]
+        ).assign_coords({
+            "field": [
+                "Real($\Omega_k$)",
+                "$\overline{\Omega}$",
+                "Ω",
+                "Real($n_k$)",
+                "$\overline{n}$",
+                "n"
+            ]
+        })
+    )

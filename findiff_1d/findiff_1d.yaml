@@ -1,4 +1,4 @@
-hasegawa_wakatani_finite_difference_1D:
+hasegawa_wakatani_findiff_1D:
     grid_size: 682
     domain: 50
     tf: 500

@@ -1,4 +1,4 @@
-hasegawa_wakatani_finite_difference_2D:
+hasegawa_wakatani_findiff_2D:
   boundary: dirichlet
   grid_size: 128
   domain: 50

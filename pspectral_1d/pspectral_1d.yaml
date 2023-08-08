@@ -1,5 +1,5 @@
-hasegawa_wakatani_spectral_1D:
-    grid_size: 1024
+hasegawa_wakatani_pspectral_1D:
+    grid_size: 682
     domain: 50
     tf: 500
     atol: 1.0e-5
