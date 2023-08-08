@@ -53,7 +53,7 @@ python main.py compare_1d
 
 # Equations
 ## Cartesian space
-$$\frac{\partial\Delta^2{\phi}}{\partial t} = -[\phi, \Delta^2\phi] + C (\tilde{\phi} - \tilde n) + \nu\Delta^4 \tilde{\phi} - \nu_z\Delta^2 \overline{\phi} \qquad \frac{\partial n}{\partial t} = -[\phi, n] + C (\tilde{\phi} - \tilde n) + D\Delta \tilde{n} - D_z \overline{n} - \kappa \frac{\partial\phi}{\partial y}$$
+$$\frac{\partial\Delta \phi}{\partial t} = -[\phi, \Delta \phi] + C (\tilde{\phi} - \tilde n) + \nu\Delta^2 \tilde{\phi} - \nu_z\Delta \overline{\phi} \qquad \frac{\partial n}{\partial t} = -[\phi, n] + C (\tilde{\phi} - \tilde n) + D\Delta \tilde{n} - D_z \overline{n} - \kappa \frac{\partial\phi}{\partial y}$$
 ## Fourier space
 $$\frac{\partial \phi_k}{\partial t} = - \frac{C_k}{k^2} (\phi_k -n_k) - ν_k\phi_k + \frac{1}{k^2} [\phi, \Delta{\phi}]_k \qquad \frac{\partial n_k}{\partial t} = C_k (\phi_k -n_k) - i \kappa k_y \phi_k -D_kn_k - [\phi,n]_k$$
 ## Single poloïdal mode
