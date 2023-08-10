@@ -119,8 +119,11 @@ class SolverWrapTqdm(AbstractWrappedSolver):
         last_t = jax.lax.cond(
             t1 > last_t + self.dt,
             lambda: host_callback.id_tap(
-                tap_func=(lambda t, transform: self.tqdm_bar.update(t)),
-                arg=t1 - last_t,
+                tap_func=(
+                    lambda t,
+                    transform: self.tqdm_bar.update(t - self.tqdm_bar.n)
+                ),
+                arg=t1,
                 result=t1,
             ),
             lambda: last_t,
@@ -401,22 +404,6 @@ def find_ky(C: float, D: float, κ: float, ν: float) -> float:
     ).x.item()
 
 
-def process_boundary(boundary):
-    if boundary is not None:
-        if isinstance(boundary, (tuple, list)):
-            assert len(boundary) == 2, "boundary must be [bc_name, bc_value]"
-            bc_name, bc_value = boundary
-        else:
-            splitted = boundary.split()
-            assert len(splitted) <= 2, 'boundary must be "bc_name bc_value"'
-            bc_name, bc_value = splitted if len(splitted) == 2 else (splitted[0], 0)
-            bc_value = float(bc_value)
-    else:
-        bc_name, bc_value = "periodic", None
-
-    return bc_name, bc_value
-
-
 def get_available_memory():
     """Return the available memory in GB"""
     if jax.lib.xla_bridge.get_backend().platform == "gpu":
@@ -627,6 +614,7 @@ def simulation_base(
         da = solve_save(
             diffeqsolve_kwargs, max_memory_will_use, save, split_callback
         )
+        tqdm_bar.update(tf - tqdm_bar.n)
 
     # add the post-simulation attributes
     z = zarr.open(file_path)
@@ -645,14 +633,16 @@ def diff_matrix(
     axis: Union[int, list[int]],
     order: int,
     acc: int = 2,
-    bc_name: str = "periodic",
-    bc_value: float = 0,
-) -> tuple[sparse.BCOO, Optional[Array], Optional[Array]]:
+    boundary: str = "periodic",
+    scipy_sparse: bool = False,
+) -> tuple[Union[sparse.BCOO, scipy.sparse.lil_matrix],
+           Optional[Array],
+           Optional[Array]]:
     """Compute the differential matrix operator
 
     https://en.wikipedia.org/wiki/Finite_difference_coefficient
-    Usage:
-    `dy = (op @ y.at[nz].set(rhs).ravel()).reshape(y.shape)`
+    Example usage for dirichlet boundary conditions (we set 0 at the edges):
+    `dy = (op @ y.at[nz].set(0).ravel()).reshape(y.shape)`
 
     Args:
         grid: the grid object
@@ -662,12 +652,12 @@ def diff_matrix(
         acc: order of accuracy, must be a positive even integer 
         bc_name: boundary condition name, 'periodic', 'dirichlet', 'neumann', 'force'
         bc_value: value of the boundary condition
+        scipy_sparse: return scipy or jax sparse matrix
 
     Return:
-        op: differential BCOO sparse 2D matrix operator with shape
+        op: differential sparse 2D matrix (jax or scipy) operator with shape
             (prod(grid.shape), prod(grid.shape))
-        nz: indices where the constraint must be applied on the state, None if periodic
-        rhs: values of the constraint of the state, None if periodic
+        nz: indices of the edges
     """
     params = locals()
     assert acc < min(grid.shape) / 2, f"acc={acc} is too big. The grid.shape is {grid.shape}."
@@ -677,9 +667,15 @@ def diff_matrix(
     else:
         op = sum([FinDiff(i, grid.step[i], order, acc=acc) for i in axis])
 
+    bc = BoundaryConditions(shape=grid.shape)
+    for i in range(len(grid.shape)):
+        slices = tuple([slice(None)] * i)
+        bc[slices + (0, )], bc[slices + (-1, )] = 0, 0
+    nz = jnp.array(bc.row_inds())
+
     square_size = jnp.prod(jnp.array(grid.shape)).item()
     op_shape = (square_size, square_size)
-    if bc_name == "periodic":
+    if boundary == "periodic":
         pos = jnp.prod(jnp.array(grid.shape[:-1], dtype=int) + 1) * (acc-1)
         op = op.matrix(grid.shape)[pos].toarray()
         row = jnp.roll(jnp.array(op), -pos).squeeze()
@@ -694,32 +690,16 @@ def diff_matrix(
             axis=0,
         )
         op = sparse.BCOO((data, indices), shape=op_shape)
-        nz, rhs = None, None
     else:
-        bc = BoundaryConditions(shape=grid.shape)
-        for i in range(len(grid.shape)):
-            find = FinDiff(i, grid.step[i], 1, acc=acc)
-            slices = tuple([slice(None)] * i)
-            bc[slices + (0,)], bc[slices + (-1,)] = {
-                "dirichlet": (bc_value, bc_value),
-                "neumann": ((find, bc_value), (find, bc_value)),
-                "force": ((find, 0), 1e-1),  # neumann ad dirichlet
-            }[bc_name]
-        nz = jnp.array(bc.row_inds())
-        rhs = jnp.array(bc.rhs[nz].toarray()).ravel()
-
         op = op.matrix(shape=grid.shape)  # convert to scipy sparse
-        op[nz, :] = bc.lhs[nz, :]  # apply boundary conditions
+        # apply boundary conditions
+        op[nz, :] = scipy.sparse.eye(square_size, format="lil")[nz, :]
 
         # when using acc > 2 and a boundary condition, the matrix is strange at the edges
         # we fix it using acc=2 at the edges only
         if acc > 2:
-            params["acc"] = 2
-            op2, _, _ = diff_matrix(**params)
-            op2 = scipy.sparse.coo_matrix(
-                (op2.data, (op2.indices[:, 0], op2.indices[:, 1])),
-                shape=op2.shape
-            ).tolil()
+            params.update({"acc": 2, "scipy_sparse": True})
+            op2, _ = diff_matrix(**params)
             pos = jnp.arange(square_size).reshape(grid.shape)
             pos = pos[tuple([slice(acc // 2, -acc // 2)] * len(grid.shape))]
             op2[pos, :] = op[pos, :]
@@ -728,29 +708,36 @@ def diff_matrix(
         if hasattr(op, "eliminate_zeros"):
             op.eliminate_zeros()
 
-        op = sparse.BCOO.from_scipy_sparse(op)  # convert to jax sparse
-    return op, nz, rhs
+        if not scipy_sparse:
+            op = sparse.BCOO.from_scipy_sparse(op)  # convert to jax sparse
+    return op, nz
+
+
+def set_neumann(y: Array, axes=None) -> Array:
+    if axes is None:
+        ax = range(y.ndim)
+    else:
+        ax = [a if a >= 0 else y.ndim + a for a in axes]
+    for i in ax:
+        slices = tuple([slice(None)] * i)
+        y = y.at[slices + (0, )].set(y[slices + (1, )])
+        y = y.at[slices + (-1, )].set(y[slices + (-2, )])
+    return y
 
 
 def append_total_1d(da):
-    weights = {
-        "Ωk_real": 2,
-        "nk_real": 2,
-        "Ωb": 1,
-        "nb": 1,
-    }
     das = [da] + [
         da.sel(field=fields).weighted(
-            xr.DataArray([weights[f] for f in fields], coords={"field": fields})
+            xr.DataArray([2, 1], coords={"field": fields})
         )
         .sum(dim="field")
         .expand_dims(dim={"field": [fields[0][0]]})
         for fields in [["Ωk_real", "Ωb"], ["nk_real", "nb"]]
     ] # yapf: disable
     return (
-        xr.concat(das, dim="field").sel(
-            field=["Ωk_real", "Ωb", "Ω", "nk_real", "nb", "n"]
-        ).assign_coords({
+        xr.concat(das, dim="field")
+        .sel(field=["Ωk_real", "Ωb", "Ω", "nk_real", "nb", "n"])
+        .assign_coords({
             "field": [
                 "Real($\Omega_k$)",
                 "$\overline{\Omega}$",
@@ -760,4 +747,4 @@ def append_total_1d(da):
                 "n"
             ]
         })
-    )
+    )  # yapf: disable

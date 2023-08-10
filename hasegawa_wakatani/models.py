@@ -17,7 +17,6 @@ from utils import (
     make_hermitian,
     init_fields_fourier_2d,
     process_params_2d,
-    process_boundary,
     fourier_to_real,
     real_to_fourier,
     get_terms,
@@ -27,7 +26,10 @@ from utils import (
     diff_matrix,
     open_with_vorticity,
     get_padded_shape,
+    set_neumann,
 )
+
+Array = Any
 
 
 @dataclasses.dataclass
@@ -455,7 +457,7 @@ def hasegawa_wakatani_findiff_1d(
     νy: float = 1e-4,
     νz: float = 0,
     ky: float = None,
-    boundary: Union[str, tuple[str, float]] = "periodic",
+    boundary: str = "periodic",
     tf: float = 300,
     domain: float = 16 * jnp.pi,
     grid_size: int = 682,
@@ -494,6 +496,15 @@ def hasegawa_wakatani_findiff_1d(
             if force, neumann (left) and dirichlet (right) are used, κ is set to κ=0,
             a particle flux source (left) is added to nb and consider to increase tf
     """
+    bc = boundary.split()
+    if len(bc) == 2:
+        bc_name, bc_value = bc[0], float(bc[1])
+    else:
+        bc_name = boundary
+        bc_value = 1e-3 if bc_name == "force" else None
+
+    assert bc_name in {"periodic", "dirichlet", "neumann", "force"}, f"boundary={boundary} is invalid, accepted boundaries are [periodic, dirichet, neumann, force VALUE]"
+
     if ky is None:
         ky = find_ky(C=C, D=Dy, κ=κ, ν=νy)
 
@@ -509,8 +520,6 @@ def hasegawa_wakatani_findiff_1d(
 
     shape = (grid_size, )
     grid = grids.Grid((grid_size, ), domain=[(0, domain)])
-
-    bc_name, bc_value = process_boundary(boundary)
 
     # initial conditions
     key = jax.random.PRNGKey(seed=seed)
@@ -548,11 +557,14 @@ def hasegawa_wakatani_findiff_1d(
 
     k1, k2 = jax.random.split(key)
     if bc_name == "force":
-        dx, nz, rhs = diff_matrix(grid, axis=0, order=1, acc=acc, bc_name="dirichlet")
-        ddx, nz, rhs = diff_matrix(grid, axis=0, order=2, acc=acc, bc_name="dirichlet")
-        dx_force, nz_force, rhs_force = diff_matrix(
-            grid, axis=0, order=1, acc=acc, bc_name="force"
+        dx, nz = diff_matrix(grid, axis=0, order=1, acc=acc, boundary="dirichlet")
+        ddx, nz = diff_matrix(grid, axis=0, order=2, acc=acc, boundary="dirichlet")
+        dx_force, _ = diff_matrix(
+            grid, axis=0, order=1, acc=acc, boundary="neumann", scipy_sparse=True
         )
+        # set dirichlet at the right edge
+        dx_force[-1, :] = jnp.zeros(grid_size).at[-1].set(1)
+        dx_force = sparse.BCOO.from_scipy_sparse(dx_force)
 
         κ = 0
         forcing = jnp.exp(
@@ -567,15 +579,11 @@ def hasegawa_wakatani_findiff_1d(
         )
         νx_, νy_, νz_, Dx_, Dy_ = [padded * χ for χ in (νx, νy, νz, Dx, Dy)]
         y0 = init_fields(key)
-        y0 = combine_state(*[χ.at[nz].set(rhs) for χ in split_state(y0)])
+        y0 = combine_state(*[χ.at[nz].set(0) for χ in split_state(y0)])
     else:
-        dx, nz, rhs = diff_matrix(
-            grid, axis=0, order=1, acc=acc, bc_name=bc_name, bc_value=bc_value
-        )
-        ddx, nz, rhs = diff_matrix(
-            grid, axis=0, order=2, acc=acc, bc_name=bc_name, bc_value=bc_value
-        )
-        dx_force, nz_force, rhs_force = dx.todense(), nz, rhs
+        dx, nz = diff_matrix(grid, axis=0, order=1, acc=acc, boundary=bc_name)
+        ddx, nz = diff_matrix(grid, axis=0, order=2, acc=acc, boundary=bc_name)
+        dx_force = dx.todense()
         forcing, well = 0, 0
         νx_, νy_, νz_, Dx_, Dy_ = νx, νy, νz, Dx, Dy
         y0 = init_fields(key)
@@ -588,21 +596,33 @@ def hasegawa_wakatani_findiff_1d(
     def term(t, y, args):
         Ωk, nk, Ωb, nb = split_state(y)
         φk, φb = ddxk_inv @ Ωk, ddx_inv @ Ωb
-        if bc_name != "periodic":
-            Ωk, nk, φk = [χ.at[nz].set(rhs) for χ in (Ωk, nk, φk)]
-            Ωb, nb, φb = [χ.at[nz_force].set(rhs_force) for χ in (Ωb, nb, φb)]
+
+        if bc_name == "neumann":
+            Ωk, nk, φk, Ωb, nb, φb = [
+                χ.at[0].set(χ[1]).at[-1].set(χ[-2]) for χ in (Ωk, nk, φk, Ωb, nb, φb)
+            ]
+        elif bc_name == "dirichlet":
+            Ωk, nk, φk, Ωb, nb, φb = [χ.at[nz].set(0) for χ in (Ωk, nk, φk, Ωb, nb, φb)]
+        elif bc_name == "force":
+            Ωk, nk, φk = [χ.at[nz].set(0) for χ in (Ωk, nk, φk)]
+            Ωb, nb, φb = [χ.at[0].set(χ[1]).at[-1].set(0) for χ in (Ωb, nb, φb)]
 
         φc = jnp.conjugate(φk)
         dφbdx = dx_force @ φb
         c_term = C * (φk-nk)
 
-        return combine_state(
-            dΩk=c_term + νx*ddx@Ωk - νy*ky2*Ωk - 1j * ky * (dφbdx*Ωk - (dx_force@Ωb) * φk),
-            dnk=c_term + Dx*ddx@nk - Dy*ky2*nk - 1j * ky * (dφbdx*nk + (κ - dx_force@nb) * φk),
-            dΩb=2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb,
-            dnb=2 * ky * dx @ jnp.imag(φc * nk) - (Dz+well) * nb + forcing,
-        ) # yapf: disable
+        dΩk = c_term + νx*ddx@Ωk - νy*ky2*Ωk - 1j * ky * (
+            dφbdx*Ωk - (dx_force@Ωb) * φk
+        )
+        dnk = c_term + Dx*ddx@nk - Dy*ky2*nk - 1j * ky * (
+            dφbdx*nk + (κ - dx_force@nb) * φk
+        )
+        dΩb = 2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb
+        dnb = 2 * ky * dx @ jnp.imag(φc * nk) - (Dz+well) * nb + forcing
 
+        if bc_name != "periodic":
+            dΩk, dnk, dΩb, dnb = [χ.at[nz].set(0) for χ in (dΩk, dnk, dΩb, dnb)]
+        return combine_state(dΩk, dnk, dΩb, dnb)
 
     def decompose(y):
         """decompose real and imag parts"""
@@ -644,7 +664,7 @@ def hasegawa_wakatani_findiff_1d(
             "νy": νy,
             "νz": νz,
             "ky": ky,
-            "boundary": bc_name + (f" {bc_value}" if bc_value != 0 else ""),
+            "boundary": bc_name + (f" {bc_value}" if bc_value else ""),
             "seed": seed,
             "acc": acc,
         },
@@ -673,31 +693,30 @@ def hasegawa_wakatani_findiff_2d(
     Dz: float = 1e-2,
     ν: float = 1e-1,
     νz: float = 1e-2,
-    boundary: Union[str, tuple[str, float]] = "periodic",
+    boundary: str = "periodic",
     acc: int = 2,
     seed: int = 42,
     solver: Union[str, type] = "Dopri8",
     filename: Union[str, Path] = None,
 ):
+    assert boundary in {"periodic", "dirichlet", "neumann"}
     C, κ, D, Dz, ν, νz = [
         χ.item() if hasattr(χ, "item") else χ for χ in (C, κ, D, Dz, ν, νz)
     ]
 
-    bc_name, bc_value = process_boundary(boundary)
     nx, ny, lx, ly, grid = process_params_2d(grid_size, domain)
 
     diff_matrix_kwargs = {
         "grid": grid,
         "acc": acc,
-        "bc_name": bc_name,
-        "bc_value": bc_value,
+        "boundary": boundary,
     }
-    dx_bcoo, nz, rhs = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
-    dy_bcoo, nz, rhs = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
-    Δ_bcoo, nz, rhs = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
+    dx_bcoo, nz = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
+    dy_bcoo, nz = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
+    Δ_bcoo, nz = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
     Δ_matmul = jax.tree_util.Partial(sparse.sparsify(jnp.matmul), Δ_bcoo)
 
-    if bc_name == "periodic":
+    if boundary == "periodic":
         y0 = init_fields_fourier_2d(
             grid,
             key=jax.random.PRNGKey(seed=seed),
@@ -707,7 +726,6 @@ def hasegawa_wakatani_findiff_2d(
         )
         y0 = jnp.fft.irfft2(y0, axes=(0, 1), norm="forward")
     else:
-        rhs = rhs.reshape(-1, 1)
         xv, yv = jnp.meshgrid(jnp.linspace(0, lx, nx), jnp.linspace(0, ly, ny))
         σx, σy = lx / 100, ly / 100
         n = jnp.exp(
@@ -715,7 +733,7 @@ def hasegawa_wakatani_findiff_2d(
         ) * 1e-2
         Ω = jnp.zeros(grid.shape)
         y0 = jnp.stack([Ω, n], axis=-1)
-        y0 = y0.reshape(-1, 2).at[nz].set(rhs).reshape(nx, ny, 2)
+        y0 = y0.reshape(-1, 2).at[nz].set(0).reshape(nx, ny, 2)
 
     def dx(y):
         return (dx_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
@@ -727,29 +745,33 @@ def hasegawa_wakatani_findiff_2d(
         return (Δ_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
 
     def term(t, y, args):
-        if bc_name != "periodic":
-            y = y.reshape(-1, 2).at[nz].set(rhs).reshape(nx, ny, 2)
-
         Ω, n = y[..., 0], y[..., 1]
-
         φ = jax.scipy.sparse.linalg.cg(
             Δ_matmul, Ω.ravel(), tol=rtol
         )[0].reshape(nx, ny)
-
         Ωnφ = jnp.array([Ω, n, φ])
+
+        if boundary == "dirichlet":
+            Ωnφ = Ωnφ.reshape(3, -1).at[:, nz].set(0).reshape(3, nx, ny)
+        elif boundary == "neumann":
+            Ωnφ = set_neumann(Ωnφ, axes=(1, 2))
 
         Ωb, nb, φb = Ωnφ.mean(-1, keepdims=True)
         Ωt, nt, φt = Ω - Ωb, n - nb, φ - φb
         c_term = C * (φt-nt)
         dΩdx, dndx, dφdx = dx(Ωnφ)
         dΩdy, dndy, dφdy = dy(Ωnφ)
+        ΔΩt, Δnt = laplacian(jnp.array[Ωt, nt])
 
-        term = jnp.stack([
-            c_term + ν * laplacian(Ωt) - νz*Ωb - dφdx*dΩdy + dφdy*dΩdx,
-            c_term + D * laplacian(nt) - Dz*nb - dφdx*dndy + dφdy*(dndx - κ)
-        ], axis=-1)  # yapf: disable
+        term = jnp.stack(
+            arrays=[
+                c_term + ν*ΔΩt - νz*Ωb - dφdx*dΩdy + dφdy*dΩdx,
+                c_term + D*Δnt - Dz*nb - dφdx*dndy + dφdy * (dndx-κ)
+            ],
+            axis=-1
+        )
 
-        if bc_name == "dirichlet":
+        if boundary != "periodic":
             # make sure the values at the boundaries don't change
             term = term.reshape(-1, 2).at[nz].set(0).reshape(nx, ny, 2)
 
@@ -773,7 +795,7 @@ def hasegawa_wakatani_findiff_2d(
             "Dz": Dz,
             "ν": ν,
             "νz": νz,
-            "boundary": bc_name + (f" {bc_value}" if bc_value != 0 else ""),
+            "boundary": boundary,
             "acc": acc,
             "seed": seed,
             "acc": acc,
