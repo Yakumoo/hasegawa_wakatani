@@ -66,7 +66,7 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
         self.k2 = kx2 + ky2
         # use this one for division
         self.k2_div = 1 / jnp.square(ks).sum(0).at[0, 0].set(1)
-        self.k2_div = self.k2_div.at[0, 0].set(0)
+        self.k2_div = self.k2_div.at[0, 0].set(0) * filter_
 
         self.linear_term = jnp.empty((*self.k2.shape, 2, 2), dtype=complex)
         self.linear_term = (
@@ -85,6 +85,7 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
         ) * filter_[..., None, None] # yapf: disable
 
         self.linear_term = make_hermitian(self.linear_term)
+        self.filter = filter_
 
     def explicit_terms(self, ŷ):
         φh, nh = jnp.moveaxis(make_hermitian(ŷ.view(dtype=complex)), -1, 0)
@@ -104,7 +105,7 @@ class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
         dnh, dφh = jnp.fft.rfft2(
             jnp.array([dφdx * dndy - dφdy * dndx, dφdx * dωdy - dφdy * dωdx]),
             axes=(1, 2), norm="forward"
-        )
+        ) * self.filter
         term = make_hermitian(jnp.stack((dφh * self.k2_div, -dnh), axis=-1))
 
         return term.view(dtype=float)
@@ -413,7 +414,7 @@ def hasegawa_wakatani_pspectral_1d(
 
     # decompose and plot
     file_path = Path(filename)
-    da = open_with_vorticity(file_path)
+    da = open_with_vorticity(file_path).sel(field=["Ω", "n"])
     y = jnp.fft.rfft(jnp.array(da), axis=2, norm="forward")
     y = [
         x for i in range(len(da.coords["field"])) for x in (

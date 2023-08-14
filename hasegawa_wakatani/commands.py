@@ -42,7 +42,7 @@ def compare_1d(
     findiff_filename = path / "findiff_1d.zarr"
     hasegawa_wakatani_pspectral_1d(**parameters, filename=pspectral_filename)
     hasegawa_wakatani_findiff_1d(
-        **parameters, acc=10, filename=findiff_filename
+        **parameters, acc=10, boundary="periodic", filename=findiff_filename
     )
     shutil.rmtree(pspectral_filename, ignore_errors=True)
     pspectral_filename = pspectral_filename.with_stem(

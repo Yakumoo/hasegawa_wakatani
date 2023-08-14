@@ -58,7 +58,7 @@ def brick_wall_filter_2d(nx, ny, nyquist=False):
     return filter_
 
 
-def make_hermitian(a):
+def make_hermitian(a, axes=(0, 1)):
     """Make the 2D Fourier space hermitian
     
     Symmetrize (conjugate) along kx in the Fourier space
@@ -67,13 +67,15 @@ def make_hermitian(a):
     Args:
         a: complex array of shape (kx, ky, ...)
     """
-    x, y = a.shape[:2]
-    return (a
-        .at[-1:x // 2:-1, 0].set(jnp.conj(a[1:x // 2, 0]))
+    x, y = a.shape[axes[0]], a.shape[axes[1]]
+    b = jnp.moveaxis(a, axes, (0, 1))
+    b = (b
+        .at[-1:x // 2:-1, 0].set(jnp.conj(b[1:x // 2, 0]))
         .at[x // 2, :].set(0)
         .at[:, -1].set(0)
-        .at[0, 0].set(jnp.real(a[0, 0]))
+        .at[0, 0].set(jnp.real(b[0, 0]))
     ) # yapf: disable
+    return jnp.moveaxis(b, (0, 1), axes)
 
 
 class SolverWrapTqdm(AbstractWrappedSolver):
@@ -82,8 +84,8 @@ class SolverWrapTqdm(AbstractWrappedSolver):
     It shows the tqdm progress bar while calling diffeqsolve
     at each `dt` interval of the simulation
     """
-    tqdm_bar: tqdm.auto.tqdm
-    # controls the simulation time interval for updating tqdm_bar
+    pbar: tqdm.auto.tqdm
+    # controls the simulation time interval for updating pbar
     dt: Union[int, float] = 1e-1
 
     @property
@@ -119,10 +121,7 @@ class SolverWrapTqdm(AbstractWrappedSolver):
         last_t = jax.lax.cond(
             t1 > last_t + self.dt,
             lambda: host_callback.id_tap(
-                tap_func=(
-                    lambda t,
-                    transform: self.tqdm_bar.update(t - self.tqdm_bar.n)
-                ),
+                tap_func=(lambda t, tf: self.pbar.update(t - self.pbar.n)),
                 arg=t1,
                 result=t1,
             ),
@@ -250,6 +249,8 @@ def init_fields_fourier_2d(
         n: the number of fields
         A: amplitude of the gaussian
         σ: standard deviation of the gaussian
+        padding: add the zero padding or not
+        laplacian: apply laplacian tot he first field or not
 
     Return:
         array of shape (grid_x, grid_y // 2 + 1) + ((n,) if n>1 else tuple())
@@ -265,18 +266,19 @@ def init_fields_fourier_2d(
     if laplacian:
         ŷ0 = ŷ0.at[..., 0].set(-k2 * ŷ0[..., 0])
 
+    ŷ0 = make_hermitian(ŷ0)
+
     if padding:
         # now we pad
         mask = brick_wall_filter_2d(*grid.shape)
         empty = jnp.tile(mask[..., None], (1, 1, n)).astype(complex)
         ŷ0 = empty.at[mask.astype(bool)].set(ŷ0.reshape(-1, n))
 
-    ŷ0 = make_hermitian(ŷ0).squeeze()
-
-    return ŷ0
+    return ŷ0.squeeze()
 
 
-def process_params_2d(grid_size, domain):
+def process_params_2d(grid_size,
+                      domain) -> tuple[int, int, float, float, grids.Grid]:
     if jnp.isscalar(domain):
         lx = jnp.array(domain).item()
         ly = lx
@@ -305,6 +307,7 @@ def fourier_to_real(ŷ: Array) -> Array:
     # move to cpu to handle large data
     y = jax.device_put(ŷ, device=jax.devices("cpu")[0]).view(dtype=complex)
     y = unpad(y, axes=(1, 2))
+    y = make_hermitian(y, axes=(1, 2))
     y = jnp.fft.irfft2(y, axes=(1, 2), norm="forward")
     nt, nx, ny = y.shape[:3]
     return y.reshape(nt, nx, ny, -1)
@@ -342,12 +345,12 @@ def rfft_mesh(grid):
     return 2 * jnp.pi * jnp.array(grid.rfft_mesh())
 
 
-def gridmesh_from_da(da):
+def gridmesh_from_da(da: xr.DataArray) -> tuple[grids.Grid, Array, Array]:
     lx, ly = da.attrs["domain"]
     nx, ny = da.coords["x"].size, da.coords["y"].size
     grid = grids.Grid((nx, ny), domain=((0, lx), (0, ly)))
     kx, ky = rfft_mesh(grid)
-    return grid, kx, ky
+    return grid, make_hermitian(kx), make_hermitian(ky)
 
 
 def open_with_vorticity(filename) -> xr.DataArray:
@@ -404,7 +407,7 @@ def find_ky(C: float, D: float, κ: float, ν: float) -> float:
     ).x.item()
 
 
-def get_available_memory():
+def get_available_memory() -> float:
     """Return the available memory in GB"""
     if jax.lib.xla_bridge.get_backend().platform == "gpu":
         import subprocess
@@ -429,7 +432,7 @@ def solve_save(
 
     available_memory = get_available_memory()
     ts = diffeqsolve_kwargs["saveat"].subs.ts
-    pbar = diffeqsolve_kwargs["solver"].tqdm_bar
+    pbar = diffeqsolve_kwargs["solver"].pbar
 
     if max_memory_will_use > available_memory:
         n_iters = int(max_memory_will_use / available_memory) + 1
@@ -598,11 +601,11 @@ def simulation_base(
             bar_format=
             "{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
             initial=t0,
-    ) as tqdm_bar:
+    ) as pbar:
 
         diffeqsolve_kwargs = {
             "terms": terms,
-            "solver": SolverWrapTqdm(solvers[solver], tqdm_bar),
+            "solver": SolverWrapTqdm(solvers[solver], pbar),
             "t0": t0,
             "t1": tf,
             "dt0": 1e-3,
@@ -614,7 +617,7 @@ def simulation_base(
         da = solve_save(
             diffeqsolve_kwargs, max_memory_will_use, save, split_callback
         )
-        tqdm_bar.update(tf - tqdm_bar.n)
+        pbar.update(tf - pbar.n)
 
     # add the post-simulation attributes
     z = zarr.open(file_path)
@@ -635,9 +638,7 @@ def diff_matrix(
     acc: int = 2,
     boundary: str = "periodic",
     scipy_sparse: bool = False,
-) -> tuple[Union[sparse.BCOO, scipy.sparse.lil_matrix],
-           Optional[Array],
-           Optional[Array]]:
+) -> tuple[Union[sparse.BCOO, scipy.sparse.lil_matrix], Array]:
     """Compute the differential matrix operator
 
     https://en.wikipedia.org/wiki/Finite_difference_coefficient
@@ -667,11 +668,9 @@ def diff_matrix(
     else:
         op = sum([FinDiff(i, grid.step[i], order, acc=acc) for i in axis])
 
-    bc = BoundaryConditions(shape=grid.shape)
-    for i in range(len(grid.shape)):
-        slices = tuple([slice(None)] * i)
-        bc[slices + (0, )], bc[slices + (-1, )] = 0, 0
-    nz = jnp.array(bc.row_inds())
+    nz = jnp.arange(jnp.prod(jnp.array(grid.shape))).reshape(grid.shape)
+    mask = jnp.ones(grid.shape).at[tuple([slice(1, -1)] * grid.ndim)].set(0)
+    nz = nz[mask.astype(bool)]
 
     square_size = jnp.prod(jnp.array(grid.shape)).item()
     op_shape = (square_size, square_size)
