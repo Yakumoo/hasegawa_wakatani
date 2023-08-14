@@ -1,5 +1,5 @@
 # Hasegawa-Wakatani turbulence simulations with [Jax](https://jax.readthedocs.io)
-## For more details, check out the [wiki](github.com/Yakumoo/hasegawa_wakatani/wiki)
+## For more details, check out the [wiki](https://github.com/Yakumoo/hasegawa_wakatani/wiki)
 https://github.com/Yakumoo/hasegawa_wakatani/assets/26108275/dfd353bb-03be-4cfd-a015-f0cbbfbf9cbd
 
 # Basic usage
