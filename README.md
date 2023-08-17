@@ -6,7 +6,7 @@ https://github.com/Yakumoo/hasegawa_wakatani/assets/26108275/dfd353bb-03be-4cfd-
 1. Create your `.yaml` file with the model and the parameters. For example:
 ```yaml
 hasegawa_wakatani_pspectral_2d:
-  grid_size: 1024
+  grid_size: 682
   tf: 100
   video_length: 20
 ```
@@ -31,3 +31,4 @@ python main.py compare_1d
 
 # Available commands
 - `compare_1d`: Run the pseudo-spectral and the finite-difference simulations using the same parameters then plot
+- `compare_1d_params`: Run `compare_1d` with differents values of `C` and `κ`

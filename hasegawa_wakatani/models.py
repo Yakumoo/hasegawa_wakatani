@@ -567,7 +567,6 @@ def hasegawa_wakatani_findiff_1d(
         dx_force[-1, :] = jnp.zeros(grid_size).at[-1].set(1)
         dx_force = sparse.BCOO.from_scipy_sparse(dx_force)
 
-        κ = 0
         forcing = jnp.exp(
             -jnp.square((x - 0.1*domain) / (domain/10))
         ) * bc_value
@@ -762,7 +761,7 @@ def hasegawa_wakatani_findiff_2d(
         c_term = C * (φt-nt)
         dΩdx, dndx, dφdx = dx(Ωnφ)
         dΩdy, dndy, dφdy = dy(Ωnφ)
-        ΔΩt, Δnt = laplacian(jnp.array[Ωt, nt])
+        ΔΩt, Δnt = laplacian(jnp.array([Ωt, nt]))
 
         term = jnp.stack(
             arrays=[

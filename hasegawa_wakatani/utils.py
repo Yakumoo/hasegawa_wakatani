@@ -350,7 +350,7 @@ def gridmesh_from_da(da: xr.DataArray) -> tuple[grids.Grid, Array, Array]:
     nx, ny = da.coords["x"].size, da.coords["y"].size
     grid = grids.Grid((nx, ny), domain=((0, lx), (0, ly)))
     kx, ky = rfft_mesh(grid)
-    return grid, make_hermitian(kx), make_hermitian(ky)
+    return grid, kx, ky
 
 
 def open_with_vorticity(filename) -> xr.DataArray:
@@ -668,12 +668,13 @@ def diff_matrix(
     else:
         op = sum([FinDiff(i, grid.step[i], order, acc=acc) for i in axis])
 
-    nz = jnp.arange(jnp.prod(jnp.array(grid.shape))).reshape(grid.shape)
+    square_size = jnp.prod(jnp.array(grid.shape)).item()
+    op_shape = (square_size, square_size)
+
+    nz = jnp.arange(square_size).reshape(grid.shape)
     mask = jnp.ones(grid.shape).at[tuple([slice(1, -1)] * grid.ndim)].set(0)
     nz = nz[mask.astype(bool)]
 
-    square_size = jnp.prod(jnp.array(grid.shape)).item()
-    op_shape = (square_size, square_size)
     if boundary == "periodic":
         pos = jnp.prod(jnp.array(grid.shape[:-1], dtype=int) + 1) * (acc-1)
         op = op.matrix(grid.shape)[pos].toarray()
@@ -701,6 +702,7 @@ def diff_matrix(
             op2, _ = diff_matrix(**params)
             pos = jnp.arange(square_size).reshape(grid.shape)
             pos = pos[tuple([slice(acc // 2, -acc // 2)] * len(grid.shape))]
+            pos = pos.ravel()
             op2[pos, :] = op[pos, :]
             op = op2
 

@@ -98,7 +98,7 @@ def main():
         hasegawa_wakatani_findiff_2d
     )
     from plots import (visualization_2d, plot_pspectral_1d, plot_components_1d)
-    from commands import (compare_1d)
+    from commands import (compare_1d, compare_1d_params)
 
     schemes = {
         "hasegawa_mima_pspectral_2d":
@@ -113,7 +113,7 @@ def main():
         (hasegawa_wakatani_findiff_2d, visualization_2d),
     }
     commands = {
-        "compare_1d": compare_1d,
+        "compare_1d": compare_1d, "compare_1d_params": compare_1d_params
     }
 
     simulation_kwargs = {}

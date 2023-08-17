@@ -3,6 +3,7 @@ from functools import partial
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
+import matplotlib.ticker
 import xarray as xr
 import tqdm.auto
 
@@ -345,6 +346,53 @@ def plot_profiles_compare_1d(da, directory, ts=None):
     )
     g.fig.savefig(
         Path(directory) / "compare_1d_profiles.pdf",
+        bbox_inches="tight",
+        pad_inches=0
+    )
+
+
+def pcolor_compare_1d_params(da, directory):
+    melted = append_total_1d(da).drop_sel(field=["Ω", "n"])
+    das = [ # melt method into field
+        melted.sel({"method": m}).assign_coords({
+            "field": [f+f" {m}" for f in melted.coords["field"].values]
+        }) for m in ("pspectral", "findiff")
+    ]
+    melted = xr.concat(das, dim="field")
+
+    fmt = matplotlib.ticker.ScalarFormatter(useMathText=True)
+    fmt.set_powerlimits((0, 0))
+    g = xr.plot.FacetGrid(melted, col="field", row="param", size=2)
+
+    for i, ax in enumerate(g.axs):
+        melted_param = melted.isel(param=i)
+        vmax = abs(melted_param.isel(field=1)).max()
+        for j in range(len(melted.coords["field"])):
+            img = melted_param.isel(field=j).plot.pcolormesh(
+                x="x",
+                y="time",
+                rasterized=True,
+                vmax=vmax,
+                cmap="seismic",
+                ax=ax[j],
+                add_colorbar=False
+            )
+            if j == 1:
+                cbar = g.fig.colorbar(
+                    img,
+                    ax=ax,
+                    cax=ax[-1].inset_axes([1.2, 0, 0.05, 1]),
+                    format=fmt,
+                )
+            ax[j].set(title=None, xlabel=None, ylabel=None)
+
+    g.set_titles(template='{value}')
+    g.set_xlabels(label="x")
+    g.set_ylabels(label="time")
+    g.fig.tight_layout()
+    g.fig.savefig(
+        Path(directory) / "compare_1d_params_pcolor.pdf",
+        dpi=100,
         bbox_inches="tight",
         pad_inches=0
     )
