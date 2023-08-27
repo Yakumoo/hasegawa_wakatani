@@ -6,15 +6,17 @@ from matplotlib.animation import FuncAnimation, FFMpegWriter
 import matplotlib.ticker
 import xarray as xr
 import tqdm.auto
+import numpy as np
 
 import jax
 import jax.numpy as jnp
 import jax_cfd.base.grids as grids
 
-from utils import open_with_vorticity, gridmesh_from_da, rfft_mesh, append_total_1d
+from hasegawa_wakatani.utils import open_with_vorticity, gridmesh_from_da, rfft_mesh, append_total_1d
 
 
 def visualization_2d(filename):
+    plot_metrics(filename)
     plot_time_frames_2d(filename)
     plot_spectrum(filename)
     return animation_2d(filename)
@@ -149,7 +151,7 @@ def plot_spectrum(filenames, n_last_frames=100):
     fig, ax = plt.subplots(figsize=(4, 3))
     for i, filename in enumerate(filenames_):
         da = open_with_vorticity(filename)
-        grid, kx, ky = gridmesh_from_da(da)
+        grid, (kx, ky) = gridmesh_from_da(da)
         k2 = jnp.square(kx) + jnp.square(ky)
         k = jnp.sqrt(k2)
         dk = kx[1, 0] - kx[0, 0]
@@ -305,8 +307,8 @@ def plot_components_1d(filename, tlim=None, xlim=None):
     ax.legend(fontsize="small", loc="lower left")
 
     g.fig.savefig(
-        file_path.with_suffix(".pdf"),
-        dpi=100,
+        file_path.with_suffix(".jpg"),
+        dpi=200,
         bbox_inches="tight",
         pad_inches=0
     )
@@ -396,3 +398,42 @@ def pcolor_compare_1d_params(da, directory):
         bbox_inches="tight",
         pad_inches=0
     )
+
+def plot_metrics(filename):
+    da = open_with_vorticity(filename)
+    dim = {"x", "y", "z"}.intersection(set(da.dims))
+
+    grid, ks = gridmesh_from_da(da)
+    k2 = jnp.square(ks).sum(0).at[0,0].set(1)
+    axes = np.array(range(1, len(dim)+1))
+    fft_kwargs = dict(axes=axes, norm="forward")
+    φk = - jnp.fft.rfft2(jnp.array(da.sel(field="Ω")), axes=axes, norm="forward") / k2
+    v2 = jnp.square(jnp.fft.irfft2(1j*ks[:, None]*φk, axes=axes+1, norm="forward")).sum(0)
+
+
+    if "n" in da.coords["field"]:
+        enstrophy = (da.sel(field="n") - da.sel(field="Ω"))**2
+        enstrophy = enstrophy.mean(dim=dim) / 2
+        
+        energy = jnp.square(jnp.array(da.sel(field="n"))) + v2
+        energy = energy.mean(axes) / 2
+
+        data = [energy, enstrophy]
+        metric_names = ["energy", "enstrophy"]
+    else: # hasegawa-mima
+        data = [v2.mean(axes)]
+        metric_names = ["energy"]
+
+    
+    xr.DataArray(
+        data=data,
+        dims=["metric", "time"],
+        coords={"metric": metric_names, "time": da.coords["time"]}
+    ).plot(x="time", hue="metric")
+    
+    plt.savefig(
+        Path(filename).with_name("metrics.pdf"),
+        bbox_inches="tight",
+        pad_inches=0
+    )
+

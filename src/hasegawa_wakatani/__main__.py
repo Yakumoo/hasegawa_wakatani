@@ -90,15 +90,15 @@ def main():
     if args.eager:
         jax.config.update("jax_disable_jit", False)
 
-    from models import (
+    from hasegawa_wakatani.models import (
         hasegawa_mima_pspectral_2d,
         hasegawa_wakatani_pspectral_2d,
         hasegawa_wakatani_pspectral_1d,
         hasegawa_wakatani_findiff_1d,
         hasegawa_wakatani_findiff_2d
     )
-    from plots import (visualization_2d, plot_pspectral_1d, plot_components_1d)
-    from commands import (compare_1d, compare_1d_params)
+    from hasegawa_wakatani.plots import (visualization_2d, plot_pspectral_1d, plot_components_1d)
+    from hasegawa_wakatani.commands import (compare_1d, compare_1d_params)
 
     schemes = {
         "hasegawa_mima_pspectral_2d":

@@ -3,10 +3,10 @@ import shutil
 
 import xarray as xr
 
-from models import (
+from hasegawa_wakatani.models import (
     hasegawa_wakatani_pspectral_1d, hasegawa_wakatani_findiff_1d
 )
-from plots import (
+from hasegawa_wakatani.plots import (
     pcolor_compare_1d, plot_profiles_compare_1d, pcolor_compare_1d_params
 )
 
@@ -29,7 +29,7 @@ def compare_1d(
     rtol=1e-10,
     video_length=10,
     video_fps=100,
-    dir_name="compare_1d",
+    filename=Path(__file__).parents[2] / "workspace" / "compare_1d",
 ):
     """Run and plot the single poloidal model
 
@@ -39,8 +39,7 @@ def compare_1d(
     """
 
     parameters = locals()
-    parameters.pop("dir_name")
-    path = Path(__file__).parents[1] / "workspace" / dir_name
+    path = Path(parameters.pop("filename"))
     path.mkdir(parents=True, exist_ok=True)
     pspectral_filename = path / "pspectral_1d.zarr"
     findiff_filename = path / "findiff_1d.zarr"
@@ -58,7 +57,7 @@ def compare_1d(
         da_findiff = da_findiff.expand_dims(dim={"method": ["findiff"]})
     da = xr.concat([da_spectral, da_findiff], dim="method")
     da.coords["method"] = da.method.astype("str")
-    da.to_zarr(path / f"{dir_name}.zarr", mode="w")
+    da.to_zarr(path / f"{path.name}.zarr", mode="w")
     shutil.rmtree(pspectral_filename, ignore_errors=True)
     shutil.rmtree(findiff_filename, ignore_errors=True)
 
@@ -66,13 +65,14 @@ def compare_1d(
     plot_profiles_compare_1d(da, path)
 
 
-def compare_1d_params(Cs=[1e-1, 1, 1e1], κs=[1e-1, 1, 1e1]):
+def compare_1d_params(Cs=[1e-1, 1, 1e1], κs=[1e-1, 1, 1e1], filename=Path(__file__).parents[2] / "workspace" / "compare_1d_params"):
 
-    path = Path(__file__).parents[1] / "workspace"
+    path = Path(filename)
+    path.mkdir(parents=True, exist_ok=True)
     das = []
     for C, κ in [(C, κ) for C in Cs for κ in κs]:
         params_name = f"C={C}_κ={κ}"
-        compare_1d(C=C, κ=κ, dir_name=params_name)
+        compare_1d(C=C, κ=κ, filename=path / params_name)
         with xr.open_dataarray(path / params_name / f"{params_name}.zarr",
                                engine="zarr") as da:
             [da.attrs.pop(k) for k in ("C", "κ", "filename")]
@@ -81,8 +81,6 @@ def compare_1d_params(Cs=[1e-1, 1, 1e1], κs=[1e-1, 1, 1e1]):
             )
         shutil.rmtree(path / params_name, ignore_errors=True)
 
-    path = path / "compare_1d_params"
-    path.mkdir(parents=True, exist_ok=True)
     da = xr.concat(das, dim="param")
 
     da.coords["param"] = da.param.astype("str")

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hasegawa_wakatani"
+description = "Hasegawa-Wakatani turbulence simulations with Jax"
+readme = "README.md"
+license = {file = "LICENSE"}
+version = "0.0.0"
+authors = [
+	{ name = "Yakumo Kunimoto" } #, email = "me@email.com" },
+]
+
+requires-python = ">=3.9"
+
+dependencies = [
+	"numpy",
+	"matplotlib",
+	"xarray",
+	"pyyaml",
+	"tqdm",
+	"scipy",
+	"findiff",
+	"zarr",
+	"jax",
+	"diffrax",
+	"jax_cfd",
+]
+
+[project.urls]
+Homepage = "https://github.com/Yakumoo/hasegawa_wakatani"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+hasegawa_wakatani = "hasegawa_wakatani.__main__:main"

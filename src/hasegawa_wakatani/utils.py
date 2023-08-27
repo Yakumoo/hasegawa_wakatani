@@ -2,6 +2,7 @@ import os
 from typing import Callable, Optional, Tuple, Union, Any, Sequence
 from timeit import default_timer as timer
 from pathlib import Path
+from functools import partial
 
 import numpy as np
 import scipy
@@ -39,9 +40,10 @@ def get_padded_shape(shape):
     padded_shape = jnp.array(shape) * 3 / 2
     return jnp.where(
         padded_shape % 2 == 0, padded_shape, jnp.ceil(padded_shape / 2) * 2
-    ).astype(int).tolist()
+    ).astype(int)
 
 
+# @partial(jax.jit, static_argnums=(0, 1))
 def brick_wall_filter_2d(nx, ny, nyquist=False):
     """Implements the 2/3 rule."""
     npx, npy = get_padded_shape([nx, ny])
@@ -220,16 +222,15 @@ def unpad(y: Array, axes: tuple[int, int] = (-2, -1)) -> Array:
         the unpadded array of `y`
     """
     npx, npy = y.shape[axes[0]], y.shape[axes[1]]
-    nx = int(npx / 3) * 2
-    ny = int(jnp.ceil(npy / 3 * 2))
-    mask = brick_wall_filter_2d(nx, int((npy-1) * 2 / 3) * 2).astype(bool)
-    new_shape = list(y.shape)
-    new_shape[axes[0]] = nx
-    new_shape[axes[1]] = ny
-    index = [slice(None)] * (y.ndim - 1)
-    pos = y.ndim + axes[0] if axes[0] < 0 else axes[0]
-    index[pos] = mask
-    return y[tuple(index)].reshape(*new_shape)
+    index = [slice(None)] * y.ndim
+    npx3 = npx // 3
+    npy3 = ((npy-1)*2+1) // 3 + 1
+    index[axes[0]] = slice(0, npx3)
+    index[axes[1]] = slice(0, npy3)
+    top = y[tuple(index)]
+    index[axes[0]] = slice(-npx3, None)
+    bottom = y[tuple(index)]
+    return jnp.concatenate([top, bottom], axis=axes[0])
 
 
 def init_fields_fourier_2d(
@@ -277,40 +278,39 @@ def init_fields_fourier_2d(
     return ŷ0.squeeze()
 
 
-def process_params_2d(grid_size,
-                      domain) -> tuple[int, int, float, float, grids.Grid]:
+def process_space_params(grid_size,
+                      domain, ndim=2) -> tuple[Sequence[int], Sequence[float], grids.Grid]:
     if jnp.isscalar(domain):
-        lx = jnp.array(domain).item()
-        ly = lx
+        ls = [jnp.array(domain).item() for _ in range(ndim)]
     else:
         assert len(domain) == 2
-        lx, ly = tuple(domain)
+        ls = tuple(domain)
 
     if jnp.isscalar(grid_size):
-        nx, ny = grid_size, grid_size
+        ns = [grid_size for i in range(ndim)]
     else:
-        assert len(grid_size) == 2
-        nx, ny = grid_size
+        assert len(grid_size) == ndim
+        ns = grid_size
 
     assert jnp.issubdtype(
-        jnp.array([nx, ny]).dtype, jnp.integer
-    ), "grid_size must be 2 integers."
+        jnp.array(ns).dtype, jnp.integer
+    ), "grid_size must be integers."
 
-    grid = grids.Grid((nx, ny), domain=((0, lx), (0, ly)))
+    grid = grids.Grid(ns, domain=[(0, x) for x in ls])
 
-    return nx, ny, lx, ly, grid
+    return ns, ls, grid
 
 
-def fourier_to_real(ŷ: Array) -> Array:
+def fourier_to_real(t: float, ŷ: Array, args=None) -> Array:
     """Convert the simulation data to direct space"""
 
     # move to cpu to handle large data
     y = jax.device_put(ŷ, device=jax.devices("cpu")[0]).view(dtype=complex)
-    y = unpad(y, axes=(1, 2))
-    y = make_hermitian(y, axes=(1, 2))
-    y = jnp.fft.irfft2(y, axes=(1, 2), norm="forward")
-    nt, nx, ny = y.shape[:3]
-    return y.reshape(nt, nx, ny, -1)
+    y = unpad(y, axes=(0, 1))
+    y = make_hermitian(y, axes=(0, 1))
+    y = jnp.fft.irfft2(y, axes=(0, 1), norm="forward")
+    nx, ny = y.shape[:2]
+    return y.reshape(nx, ny, -1)
 
 
 def real_to_fourier(y: Array) -> Array:
@@ -345,12 +345,9 @@ def rfft_mesh(grid):
     return 2 * jnp.pi * jnp.array(grid.rfft_mesh())
 
 
-def gridmesh_from_da(da: xr.DataArray) -> tuple[grids.Grid, Array, Array]:
-    lx, ly = da.attrs["domain"]
-    nx, ny = da.coords["x"].size, da.coords["y"].size
-    grid = grids.Grid((nx, ny), domain=((0, lx), (0, ly)))
-    kx, ky = rfft_mesh(grid)
-    return grid, kx, ky
+def gridmesh_from_da(da: xr.DataArray) -> tuple[grids.Grid, Array]:
+    grid = grids.Grid(da.attrs["grid_size"], domain=[(0, x) for x in da.attrs["domain"]])
+    return grid, rfft_mesh(grid)
 
 
 def open_with_vorticity(filename) -> xr.DataArray:
@@ -369,7 +366,7 @@ def open_with_vorticity(filename) -> xr.DataArray:
         return da
 
     # add vorticity field
-    grid, kx, ky = gridmesh_from_da(da)
+    grid, (kx, ky) = gridmesh_from_da(da)
     φs = [c for c in da.coords["field"].values if "φ" in c]
     vorticity = jnp.fft.irfft2(
         -(jnp.square(kx) + jnp.square(ky))[..., None] * jnp.fft
@@ -473,11 +470,10 @@ def simulation_base(
     rtol: float = 1e-6,
     video_length: float = 1,
     video_fps: Union[int, float] = 20,
-    apply: Optional[tuple[Callable[[Array], Array], Callable[[Array],
+    apply: Optional[tuple[Callable[[Array], Array], Callable[[float, Array, Any],
                                                              Array]]] = None,
     filename: Optional[Union[str, Path]] = None,
     split_callback: Optional[Callable[[], None]] = None,
-    saveat_fn: Callable[[float, Array, Any], Array] = (lambda t, y, args: y),
 ):
     """General purpose simulation and saving
 
@@ -556,10 +552,9 @@ def simulation_base(
             y0 = apply[0](y0)
     else:
         # overwrite with an empty file
-        y_dummy = saveat_fn(0, y0, None)[None]
-        y_dummy = apply[1](y_dummy) if apply is not None else y_dummy
+        y_dummy = apply[1](0, y0, None) if apply is not None else y0
         xr.DataArray(
-            data=jnp.array([]).reshape(-1, *y_dummy.shape[1:]),
+            data=jnp.array([]).reshape(-1, *y_dummy.shape),
             dims=dims,
             coords={"time": []} | coords,
             attrs=attrs_,
@@ -578,13 +573,13 @@ def simulation_base(
         y0.size * video_nframes * {
             jnp.dtype("float64"): 8, jnp.dtype("float32"): 4
         }[y0.dtype]  # number of bytes
-        * 3  # it seems it will be buffered twice + 1 for safety
+        * 4  # it seems it will be buffered twice + 2 for safety
         / 1000000000  # convert to GB
     )
 
     def save(ys, ts):
         da = xr.DataArray(
-            apply[1](ys) if apply else ys,
+            ys,
             dims=dims,
             coords={"time": ts} | coords,
             attrs=attrs_,
@@ -593,6 +588,14 @@ def simulation_base(
         da.to_zarr(file_path, append_dim="time")
 
         return da
+
+    if apply is not None:
+        save_fn = apply[1]
+    else:
+        # by default we put in the CPU because it might not fit in the GPU
+        def save_fn(t, y, args=None):
+            return jax.device_put(y, device=jax.devices("cpu")[0])
+
 
     t1 = timer()
     with tqdm.auto.tqdm(
@@ -610,7 +613,7 @@ def simulation_base(
             "t1": tf,
             "dt0": 1e-3,
             "y0": y0,
-            "saveat": SaveAt(ts=time_linspace, fn=saveat_fn),
+            "saveat": SaveAt(ts=time_linspace, fn=save_fn),
             "stepsize_controller": PIDController(atol=atol, rtol=rtol),
             "max_steps": None,
         }
