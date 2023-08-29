@@ -2,11 +2,10 @@ import os
 from typing import Callable, Optional, Tuple, Union, Any, Sequence
 from timeit import default_timer as timer
 from pathlib import Path
-from functools import partial
 
 import numpy as np
 import scipy
-from findiff import FinDiff, BoundaryConditions
+from findiff import FinDiff
 import zarr
 import xarray as xr
 import tqdm.auto
@@ -21,29 +20,33 @@ KeyArray = Union[Array, jax._src.prng.PRNGKeyArray]
 import diffrax
 from diffrax import (
     diffeqsolve,
-    Dopri5,
-    Dopri8,
     MultiTerm,
     ODETerm,
     SaveAt,
     PIDController,
     AbstractWrappedSolver,
-    NewtonNonlinearSolver,
-    AbstractNonlinearSolver,
     AbstractAdaptiveSolver,
     AbstractTerm,
 )
 import jax_cfd.base.grids as grids
 
 
-def get_padded_shape(shape):
-    padded_shape = jnp.array(shape) * 3 / 2
-    return jnp.where(
-        padded_shape % 2 == 0, padded_shape, jnp.ceil(padded_shape / 2) * 2
+def get_padded_shape(shape: Sequence[int]):
+    """ Get the padded shape using the 2/3 zero padding rule
+
+    We use np instead of jnp because a shape should be considered as a static parameter
+
+    Args:
+        shape: the (full) space shape without the symmetry, (not the half shape)
+    Return:
+        the padded shape (full, not the half)
+    """
+    padded_shape = np.array(shape) * 3 / 2
+    return np.where(
+        padded_shape % 2 == 0, padded_shape, np.ceil(padded_shape / 2) * 2
     ).astype(int)
 
 
-# @partial(jax.jit, static_argnums=(0, 1))
 def brick_wall_filter_2d(nx, ny, nyquist=False):
     """Implements the 2/3 rule."""
     npx, npy = get_padded_shape([nx, ny])
@@ -69,15 +72,29 @@ def make_hermitian(a, axes=(0, 1)):
     Args:
         a: complex array of shape (kx, ky, ...)
     """
-    x, y = a.shape[axes[0]], a.shape[axes[1]]
-    b = jnp.moveaxis(a, axes, (0, 1))
-    b = (b
-        .at[-1:x // 2:-1, 0].set(jnp.conj(b[1:x // 2, 0]))
-        .at[x // 2, :].set(0)
-        .at[:, -1].set(0)
-        .at[0, 0].set(jnp.real(b[0, 0]))
-    ) # yapf: disable
-    return jnp.moveaxis(b, (0, 1), axes)
+    b = jnp.moveaxis(a, axes, range(len(axes)))
+    if len(axes) == 2:
+        x, y = b.shape[:2]
+        b = (b
+            .at[-1:x // 2:-1, 0].set(jnp.conj(b[1:x // 2, 0]))
+            .at[x // 2, :].set(0)
+            .at[:, -1].set(0)
+            .at[0, 0].set(jnp.real(b[0, 0]))
+        ) # yapf: disable
+    elif len(axes) == 3:
+        x, y, z = b.shape[:3]
+        b = (b
+            .at[-1:x // 2:-1, -1:y // 2:-1, 0].set(jnp.conj(b[1:x // 2, 1:y // 2, 0]))
+            .at[-1:x // 2:-1, 1:y // 2, 0].set(jnp.conj(b[1:x // 2, -1:y // 2:-1, 0]))
+            .at[x // 2, :].set(0)
+            .at[:, y // 2, :].set(0)
+            .at[:, -1].set(0)
+            .at[0, 0, 0].set(jnp.real(b[0, 0, 0]))
+        ) # yapf: disable
+    else:
+        raise NotImplementedError("Only 2D and 3D are implemented.")
+
+    return jnp.moveaxis(b, range(len(axes)), axes)
 
 
 class SolverWrapTqdm(AbstractWrappedSolver):
@@ -148,10 +165,10 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
     alphas = jnp.array([0, 0.1496590219993, 0.3704009573644, 0.6222557631345, 0.9582821306748, 1])
     betas = jnp.array([0, -0.4178904745, -1.192151694643, -1.697784692471, -1.514183444257])
     gammas = jnp.array([0.1496590219993, 0.3792103129999, 0.8229550293869, 0.6994504559488, 0.1530572479681])
+    μdt = jnp.diff(alphas) / 2  # precompute the diff
     # yapf: enable
 
     def init(self, terms, t0, t1, y0, args):
-        self.μdt = jnp.diff(self.alphas) / 2  # precompute the diff
         return None
 
     def order(self, terms):
@@ -172,9 +189,6 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
         term_ex, term_im, term_solve = terms
         α, μdt, β, γ = self.alphas, self.μdt, self.betas, self.gammas  # short aliases
         dt = t1 - t0
-        control_ex = term_ex.contr(t0, t1)
-        control_im = term_im.contr(t0, t1)
-        control_solve = term_solve.contr(t0, t1)
 
         # first iteration out of the loop so we can save ex0 and im0 for euler_y1
         ex0 = term_ex.vf(t0, y0, args)
@@ -208,7 +222,25 @@ class CrankNicolsonRK4(AbstractAdaptiveSolver):
         return f1 + f2
 
 
-def unpad(y: Array, axes: tuple[int, int] = (-2, -1)) -> Array:
+
+def fourier_pad(y, axes=(-2,-1)):
+    space_shape = [y.shape[x] for x in axes]
+    space_shape[-1] = (space_shape[-1] - 1) * 2 + 1
+    space_shape_padded = get_padded_shape(space_shape)
+    pad_width = [[0, 0] for _ in y.shape]
+    for i, axis in enumerate(axes):
+        pad_width[axis] = [(space_shape_padded[i] - space_shape[i])//2]*2
+    pad_width[axes[-1]][0] = 0
+
+    y_padded = jnp.fft.fftshift(y, axes=axes[:-1])
+    y_padded = jnp.pad(array=y_padded, pad_width=pad_width)
+    y_padded = jnp.fft.ifftshift(y_padded, axes=axes[:-1])
+
+    return y_padded
+
+
+
+def fourier_unpad(y: Array, axes: tuple[int, int] = (-2, -1)) -> Array:
     """Unpad the Fourier space
     
     Remove the zero padding (2/3 rule). Thus, the final shape is smaller
@@ -221,16 +253,20 @@ def unpad(y: Array, axes: tuple[int, int] = (-2, -1)) -> Array:
     Return:
         the unpadded array of `y`
     """
-    npx, npy = y.shape[axes[0]], y.shape[axes[1]]
-    index = [slice(None)] * y.ndim
-    npx3 = npx // 3
-    npy3 = ((npy-1)*2+1) // 3 + 1
-    index[axes[0]] = slice(0, npx3)
-    index[axes[1]] = slice(0, npy3)
-    top = y[tuple(index)]
-    index[axes[0]] = slice(-npx3, None)
-    bottom = y[tuple(index)]
-    return jnp.concatenate([top, bottom], axis=axes[0])
+    shape = list(y.shape)
+    shape[axes[-1]] = (shape[axes[-1]] - 1) * 2 + 1 
+    select = [slice(None)]*y.ndim
+    for axis in axes:
+        pad_width = (shape[axis] - int(shape[axis] / 3) * 2) // 2
+        select[axis] = slice(np.where(axis == axes[-1], 0, pad_width), -pad_width)
+
+    y_unpadded = jnp.fft.fftshift(y, axes=axes[:-1])[tuple(select)]
+    y_unpadded = jnp.fft.ifftshift(y_unpadded, axes=axes[:-1])
+
+    return y_unpadded
+
+
+
 
 
 def init_fields_fourier_2d(
@@ -239,7 +275,6 @@ def init_fields_fourier_2d(
     n: int = 1,
     A: float = 1e-4,
     σ: float = 0.5,
-    padding=True,
     laplacian=False,
 ) -> Array:
     """Create the initial fields in the fourier space
@@ -250,32 +285,25 @@ def init_fields_fourier_2d(
         n: the number of fields
         A: amplitude of the gaussian
         σ: standard deviation of the gaussian
-        padding: add the zero padding or not
         laplacian: apply laplacian tot he first field or not
 
     Return:
         array of shape (grid_x, grid_y // 2 + 1) + ((n,) if n>1 else tuple())
     """
 
-    kx, ky = rfft_mesh(grid)
-    k2 = jnp.square(kx) + jnp.square(ky)
+    ks = rfft_mesh(grid)
+    k2 = jnp.square(ks).sum(0)
     ŷ0 = A * jnp.exp(
         -k2[..., None] / 2 / jnp.square(σ)
-        + 2j * jnp.pi * jax.random.uniform(key, kx.shape + (n, ))
+        + 2j * jnp.pi * jax.random.uniform(key, k2.shape + (n, ))
     )
 
     if laplacian:
         ŷ0 = ŷ0.at[..., 0].set(-k2 * ŷ0[..., 0])
 
-    ŷ0 = make_hermitian(ŷ0)
+    ŷ0 = make_hermitian(ŷ0).squeeze()
 
-    if padding:
-        # now we pad
-        mask = brick_wall_filter_2d(*grid.shape)
-        empty = jnp.tile(mask[..., None], (1, 1, n)).astype(complex)
-        ŷ0 = empty.at[mask.astype(bool)].set(ŷ0.reshape(-1, n))
-
-    return ŷ0.squeeze()
+    return ŷ0
 
 
 def process_space_params(grid_size,
@@ -283,7 +311,7 @@ def process_space_params(grid_size,
     if jnp.isscalar(domain):
         ls = [jnp.array(domain).item() for _ in range(ndim)]
     else:
-        assert len(domain) == 2
+        assert len(domain) == ndim
         ls = tuple(domain)
 
     if jnp.isscalar(grid_size):
@@ -301,30 +329,19 @@ def process_space_params(grid_size,
     return ns, ls, grid
 
 
-def fourier_to_real(t: float, ŷ: Array, args=None) -> Array:
+def fourier_to_real(t: float, ŷ: Array, args=None, ndim=2) -> Array:
     """Convert the simulation data to direct space"""
-
+    axes = tuple(range(ndim))
     # move to cpu to handle large data
     y = jax.device_put(ŷ, device=jax.devices("cpu")[0]).view(dtype=complex)
-    y = unpad(y, axes=(0, 1))
-    y = make_hermitian(y, axes=(0, 1))
-    y = jnp.fft.irfft2(y, axes=(0, 1), norm="forward")
-    nx, ny = y.shape[:2]
-    return y.reshape(nx, ny, -1)
+    y = make_hermitian(y, axes=axes)
+    y = jnp.fft.irfftn(y, axes=axes, norm="forward")
+    return y.reshape(*y.shape[:ndim], -1)
 
 
 def real_to_fourier(y: Array) -> Array:
     """Convert the initial state to Fourier space"""
-    nx, ny = y.shape[:2]
-    npx, npy = get_padded_shape([nx, ny])
-    y0 = y.squeeze()
-    y = jnp.fft.rfft2(y0, axes=(0, 1), norm="forward")
-    return (  # padding
-        jnp.zeros((npx, npy // 2 + 1, 2), dtype=complex)
-        .at[brick_wall_filter_2d(nx, ny).astype(bool)]
-        .set(y.reshape(-1, *y0.shape[2:]))
-        .view(dtype=float)
-    )
+    return jnp.fft.rfftn(y.squeeze(), axes=range(y.ndim-1), norm="forward").view(dtype=float)
 
 
 def get_terms(m, solver):
@@ -366,12 +383,13 @@ def open_with_vorticity(filename) -> xr.DataArray:
         return da
 
     # add vorticity field
-    grid, (kx, ky) = gridmesh_from_da(da)
+    grid, ks = gridmesh_from_da(da)
     φs = [c for c in da.coords["field"].values if "φ" in c]
-    vorticity = jnp.fft.irfft2(
-        -(jnp.square(kx) + jnp.square(ky))[..., None] * jnp.fft
-        .rfft2(jnp.array(da.sel(field=φs)), axes=(1, 2), norm="forward"),
-        axes=(1, 2),
+    axes = (1, 2, 3) if "z" in da.coords else (1, 2)
+    vorticity = jnp.fft.irfftn(
+        -jnp.square(ks).sum(0)[..., None] * jnp.fft
+        .rfftn(jnp.array(da.sel(field=φs)), axes=axes, norm="forward"),
+        axes=axes,
         norm="forward",
     )
     vorticity = xr.DataArray(
@@ -493,9 +511,8 @@ def simulation_base(
         video_length, video_fps: length (in seconds) and fps of the output saved.
             The total number of frames saved is video_length * video_fps
         apply: (to_diffeqsolve, to_dataarray). 
-            When resuming a simulation: y0 = to_diffeqsolve(ys[-1])
-            For converting to DataArray: to_dataarray(ys)
-            where ys has an additional leading time dimension
+            When resuming a simulation: y0 = to_diffeqsolve(y)
+            For converting to DataArray: to_dataarray(t, y, args=None)
         filename: the output file name, expected to be a .zarr file
         split_callback: callback when the simulation is splitted
 
@@ -504,10 +521,10 @@ def simulation_base(
     file_path = Path(filename)
     resume = False
 
-    nonlinear_solver = NewtonNonlinearSolver(rtol=rtol, atol=atol)
     solvers = {
-        "Dopri5": Dopri5(),
-        "Dopri8": Dopri8(),
+        "Tsit5": diffrax.Tsit5(),
+        "Dopri5": diffrax.Dopri5(),
+        "Dopri8": diffrax.Dopri8(),
         "CrankNicolsonRK4": CrankNicolsonRK4(),
     }
 
@@ -536,7 +553,6 @@ def simulation_base(
                                                              ) > 0 and same:
                 t0 = da.attrs["tf"]
                 y0 = jnp.array(da.isel(time=-1))
-                runtime_old = da.attrs.get("runtime", 0)
                 resume = True
                 print(f"The simulation is resumed from {filename}.")
 
@@ -639,9 +655,8 @@ def diff_matrix(
     axis: Union[int, list[int]],
     order: int,
     acc: int = 2,
-    boundary: str = "periodic",
-    scipy_sparse: bool = False,
-) -> tuple[Union[sparse.BCOO, scipy.sparse.lil_matrix], Array]:
+    padding: bool = False,
+) -> sparse.BCOO:
     """Compute the differential matrix operator
 
     https://en.wikipedia.org/wiki/Finite_difference_coefficient
@@ -654,14 +669,12 @@ def diff_matrix(
             0 => ∂x, 1 => ∂y, 3 => ∂z, [0, 1] => ∂x + ∂y
         order: derivative order, ∂^order
         acc: order of accuracy, must be a positive even integer 
-        bc_name: boundary condition name, 'periodic', 'dirichlet', 'neumann', 'force'
-        bc_value: value of the boundary condition
-        scipy_sparse: return scipy or jax sparse matrix
+        padding: if True, there is no padding and we suppose boudaries are periodic
+            otherwise, a padding is added to the matrix
 
     Return:
-        op: differential sparse 2D matrix (jax or scipy) operator with shape
-            (prod(grid.shape), prod(grid.shape))
-        nz: indices of the edges
+        op: differential sparse 2D matrix (jax or scipy) operator with shape (x, x) where
+            x = np.prod(grid.shape) + (acc if padding else 0)
     """
     params = locals()
     assert acc < min(grid.shape) / 2, f"acc={acc} is too big. The grid.shape is {grid.shape}."
@@ -674,11 +687,16 @@ def diff_matrix(
     square_size = jnp.prod(jnp.array(grid.shape)).item()
     op_shape = (square_size, square_size)
 
-    nz = jnp.arange(square_size).reshape(grid.shape)
-    mask = jnp.ones(grid.shape).at[tuple([slice(1, -1)] * grid.ndim)].set(0)
-    nz = nz[mask.astype(bool)]
+    if padding:
+        nz = jnp.arange(square_size).reshape(grid.shape)
+        mask = jnp.ones(grid.shape).at[tuple([slice(acc//2, -acc//2)] * grid.ndim)].set(0)
+        nz = nz[mask.astype(bool)]
 
-    if boundary == "periodic":
+        op = op.matrix(shape=np.array(grid.shape) + acc)  # convert to scipy sparse
+        # set identity to padding
+        op[nz, :] = scipy.sparse.eye(op.shape[0], format="lil")[nz, :]
+        op = sparse.BCOO.from_scipy_sparse(op)  # convert to jax sparse
+    else: # periodic boundaries
         pos = jnp.prod(jnp.array(grid.shape[:-1], dtype=int) + 1) * (acc-1)
         op = op.matrix(grid.shape)[pos].toarray()
         row = jnp.roll(jnp.array(op), -pos).squeeze()
@@ -693,40 +711,86 @@ def diff_matrix(
             axis=0,
         )
         op = sparse.BCOO((data, indices), shape=op_shape)
+
+    if hasattr(op, "eliminate_zeros"):
+        op.eliminate_zeros()
+
+
+    return op
+
+def diff_fn(
+    grid: grids.Grid,
+    axis: Union[int, list[int]],
+    order: int,
+    acc: int = 2,
+    boundary: Union[str, Callable[[Array, tuple[int, int], int, dict], None]] = "periodic",
+):
+    assert acc < min(grid.shape) / 2, f"acc={acc} is too big. The grid.shape is {grid.shape}."
+
+    if callable(boundary): # custom padding
+        mode = boundary
     else:
-        op = op.matrix(shape=grid.shape)  # convert to scipy sparse
-        # apply boundary conditions
-        op[nz, :] = scipy.sparse.eye(square_size, format="lil")[nz, :]
+        assert boundary in {"periodic", "dirichlet", "neumann"}, f"Invalid boundary={boundary}, accepted boundaries are: periodic, dirichlet, neumann"
+        mode = {
+            "periodic": "wrap",
+            "dirichlet": "constant",
+            "neumann": "edge",
+        }[boundary]
 
-        # when using acc > 2 and a boundary condition, the matrix is strange at the edges
-        # we fix it using acc=2 at the edges only
-        if acc > 2:
-            params.update({"acc": 2, "scipy_sparse": True})
-            op2, _ = diff_matrix(**params)
-            pos = jnp.arange(square_size).reshape(grid.shape)
-            pos = pos[tuple([slice(acc // 2, -acc // 2)] * len(grid.shape))]
-            pos = pos.ravel()
-            op2[pos, :] = op[pos, :]
-            op = op2
-
-        if hasattr(op, "eliminate_zeros"):
-            op.eliminate_zeros()
-
-        if not scipy_sparse:
-            op = sparse.BCOO.from_scipy_sparse(op)  # convert to jax sparse
-    return op, nz
-
-
-def set_neumann(y: Array, axes=None) -> Array:
-    if axes is None:
-        ax = range(y.ndim)
+    if isinstance(axis, int):
+        op = FinDiff(axis, grid.step[axis], order, acc=acc)
     else:
-        ax = [a if a >= 0 else y.ndim + a for a in axes]
-    for i in ax:
-        slices = tuple([slice(None)] * i)
-        y = y.at[slices + (0, )].set(y[slices + (1, )])
-        y = y.at[slices + (-1, )].set(y[slices + (-2, )])
-    return y
+        op = sum([FinDiff(i, grid.step[i], order, acc=acc) for i in axis])
+
+    stencil = op.stencil(grid.shape).data[tuple('C' for _ in range(grid.ndim))]
+    stencil = [(tuple(slice(acc//2+offset, acc//2+offset+grid.shape[i]) for i, offset in enumerate(k)), v) for k, v in stencil.items()]
+
+    def fn(y):
+        pad_width = [(0,0)]*y.ndim
+        for i in range(grid.ndim):
+            pad_width[-i-1] = (acc//2, acc//2)
+        y_padded = jnp.pad(y, pad_width=pad_width, mode=mode)
+        pre = tuple([slice(None)] * (y.ndim - grid.ndim))
+        return sum([y_padded[pre + k]*v for k,v in stencil])
+
+    return fn
+
+
+
+def arakawa_fn(grid, boundary):
+    mode = {
+        "periodic": "wrap",
+        "dirichlet": "constant",
+        "neumann": "edge",
+    }[boundary]
+    arakawa_norm = 12 * jnp.prod(jnp.array(grid.step))
+    c = slice(1, -1)
+    p = slice(2, None)
+    m = slice(0, -2)
+    def _arakawa(ζ, ψ):
+        ζψ = jnp.pad(jnp.array([ζ, ψ]), pad_width=[(0,0), (1,1), (1,1)], mode=mode)
+        ζ_east, ψ_east = ζψ[:, p, c]
+        ζ_west, ψ_west = ζψ[:, m, c]
+        ζ_north, ψ_north = ζψ[:, c, p]
+        ζ_south, ψ_south = ζψ[:, c, m]
+        ζ_ne, ψ_ne = ζψ[:, p, p]
+        ζ_se, ψ_se = ζψ[:, p, m]
+        ζ_sw, ψ_sw = ζψ[:, m, m]
+        ζ_nw, ψ_nw = ζψ[:, m, p]
+
+        return (
+            ζ_east * (ψ_north - ψ_south + ψ_ne - ψ_se)
+            - ζ_west * (ψ_north - ψ_south + ψ_nw - ψ_sw)
+            - ζ_north * (ψ_east - ψ_west + ψ_ne - ψ_nw)
+            + ζ_south * (ψ_east - ψ_west + ψ_se - ψ_sw)
+            + ζ_se * (ψ_east - ψ_south)
+            + ζ_ne * (ψ_north - ψ_east)
+            - ζ_nw * (ψ_north - ψ_west)
+            - ζ_sw * (ψ_west - ψ_south)
+        ) / arakawa_norm
+
+    return _arakawa
+
 
 
 def append_total_1d(da):
@@ -752,3 +816,4 @@ def append_total_1d(da):
             ]
         })
     )  # yapf: disable
+

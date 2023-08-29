@@ -84,19 +84,13 @@ def animation_2d(x, fields=["Ω", "n"]):
         "iterable": range(video_nframes),
         "desc": "Animation",
     }
-    if isinstance(x, xr.DataArray):
-        plt.close()
-        with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
-            a = ani.to_html5_video(embed_limit=100)
-        return HTML(a)
-    else:
 
-        with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
-            ani.save(
-                Path(x).with_suffix(".mp4"),
-                writer=FFMpegWriter(fps=video_fps)
-            )
-        fig.savefig(Path(x).with_name("last_frame.pdf"), dpi=100)
+    with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
+        ani.save(
+            Path(x).with_suffix(".mp4"),
+            writer=FFMpegWriter(fps=video_fps)
+        )
+    fig.savefig(Path(x).with_name("last_frame.pdf"), dpi=100)
 
 
 def plot_time_frames_2d(filename, frames=[0, 0.25, 0.5, 1]):
@@ -307,7 +301,7 @@ def plot_components_1d(filename, tlim=None, xlim=None):
     ax.legend(fontsize="small", loc="lower left")
 
     g.fig.savefig(
-        file_path.with_suffix(".jpg"),
+        file_path.with_suffix(".pdf"),
         dpi=200,
         bbox_inches="tight",
         pad_inches=0
@@ -436,4 +430,98 @@ def plot_metrics(filename):
         bbox_inches="tight",
         pad_inches=0
     )
+
+def visualization_3d(filename):
+    animation_3d(filename)
+
+def animation_3d(filename, fields=["Ω", "n"]):
+    """Create a .mp4 video of the 2D simulation"""
+
+    assert set(fields).issubset({"n", "φ", "Ω"})
+    da = open_with_vorticity(filename)
+    if "n" not in da.coords["field"].values:
+        fields = ["Ω", "φ"]
+
+    video_nframes = len(da)
+    video_fps = da.attrs["video_fps"]
+    tf = da.coords["time"].values[-1]
+
+    x, y, z = [da.coords[x].values for x in ("x", "y", "z")]
+
+    fig, axes = plt.subplots(1, len(fields), figsize=(10, 5), subplot_kw=dict(projection="3d"))
+    cmap = plt.cm.seismic
+    images = []
+    for i, field in enumerate(fields):
+        da_sel = da.sel(time=0, field=field)
+        for j, slice_value in enumerate([x.max(), 0, z.max()]):
+            dim_name = ["x", "y", "z"][j]
+            xyz = [x, y, z]
+            xyz.pop(j)
+            xyz = jnp.meshgrid(*xyz)
+            xyz.insert(j, np.ones(xyz[0].shape) * slice_value)
+            polyc = axes[i].plot_surface(
+                *xyz,
+                facecolors=cmap(da_sel.sel({dim_name: slice_value})),
+                cmap="seismic"
+            )
+            images.append(polyc)
+    
+    for image, field, ax in zip(images, fields, axes):
+        # image.set(cmap="seismic")
+        ax.set(title=field, xticks=[], yticks=[])
+    text_time = fig.text(0.5, 0.96, "")
+    colorbar = fig.colorbar(
+        images[1],
+        ax=axes,
+        location="right",
+        pad=0,
+        cax=ax.inset_axes([1.01, 0, 0.02, 1]),
+    )
+    colorbar.formatter.set_powerlimits((0.1, 10))
+    fig.tight_layout()
+    args = {
+        "vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()
+    }
+
+    def init():
+        return images
+
+    def update(frame, args):
+        y = da.isel(time=frame)
+        vmax = jnp.abs(jnp.array(y.sel(field=fields))).max()
+        vmax = 0.2*vmax + 0.8 * args["vmax_last"]
+        args["vmax_last"] = vmax
+        for i, field in enumerate(fields):
+            da_sel = da.isel(time=frame).sel(field=field)
+            for j, slice_value in enumerate([x.max(), 0, z.max()]):
+                images[i*len(fields)+j].set(
+                    facecolors=cmap(da_sel.sel({["x", "y", "z"][j]: slice_value})),
+                    clim=(-vmax, vmax),
+                )
+        colorbar.update_normal(image.colorbar.mappable)
+        pbar.update(1)
+        text_time.set_text(f"Time={frame / video_nframes * tf:.3f}")
+        return images
+
+    ani = FuncAnimation(
+        fig,
+        partial(update, args=args),
+        frames=video_nframes,
+        interval=1000 / video_fps,
+        init_func=init,
+        blit=True,
+    )
+
+    tqdm_kwargs = {
+        "iterable": range(video_nframes),
+        "desc": "Animation",
+    }
+
+    with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
+        ani.save(
+            Path(filename).with_suffix(".mp4"),
+            writer=FFMpegWriter(fps=video_fps)
+        )
+    fig.savefig(Path(filename).with_name("last_frame.pdf"), dpi=100)
+
 

@@ -92,17 +92,20 @@ def main():
 
     from hasegawa_wakatani.models import (
         hasegawa_mima_pspectral_2d,
+        hasegawa_wakatani_pspectral_3d,
         hasegawa_wakatani_pspectral_2d,
         hasegawa_wakatani_pspectral_1d,
         hasegawa_wakatani_findiff_1d,
         hasegawa_wakatani_findiff_2d
     )
-    from hasegawa_wakatani.plots import (visualization_2d, plot_pspectral_1d, plot_components_1d)
+    from hasegawa_wakatani.plots import (visualization_3d, visualization_2d, plot_pspectral_1d, plot_components_1d)
     from hasegawa_wakatani.commands import (compare_1d, compare_1d_params)
 
     schemes = {
         "hasegawa_mima_pspectral_2d":
         (hasegawa_mima_pspectral_2d, visualization_2d),
+        "hasegawa_wakatani_pspectral_3d":
+        (hasegawa_wakatani_pspectral_3d, visualization_3d),
         "hasegawa_wakatani_pspectral_2d":
         (hasegawa_wakatani_pspectral_2d, visualization_2d),
         "hasegawa_wakatani_pspectral_1d":

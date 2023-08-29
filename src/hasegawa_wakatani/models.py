@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Tuple, Union, Any, Sequence
 import dataclasses
 from pathlib import Path
+from functools import partial
 
 import xarray as xr
 
@@ -21,112 +22,18 @@ from hasegawa_wakatani.utils import (
     real_to_fourier,
     get_terms,
     rfft_mesh,
+    fourier_pad,
+    fourier_unpad,
     find_ky,
     simulation_base,
     diff_matrix,
+    diff_fn,
+    arakawa_fn,
     open_with_vorticity,
     get_padded_shape,
-    set_neumann,
 )
 
 Array = Any
-
-
-@dataclasses.dataclass
-class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
-    """Breaks the Hasegawa Wakatani equation into implicit and explicit parts.
-    Implicit parts are the linear terms and explicit parts are the non-linear
-    terms.
-    Attributes:
-        grid: underlying grid of the process
-        κ: gradient of the density
-        ν: kinematic viscosity, strength of the diffusion term
-        D: diffusion coefficient
-        C: adiabatic coefficient
-    """
-
-    grid: grids.Grid
-    C: float = 1
-    Dx: float = 1e-4
-    Dy: float = 1e-4
-    Dz: float = 1e-4
-    νx: float = 1e-4
-    νy: float = 1e-4
-    νz: float = 1e-4
-    κ: float = 1
-    modified: bool = True
-
-    def __post_init__(self):
-        padded_grid = grids.Grid(
-            shape=get_padded_shape(self.grid.shape), domain=self.grid.domain
-        )
-        filter_ = brick_wall_filter_2d(*self.grid.shape, nyquist=True)
-        ks = rfft_mesh(padded_grid)
-        kx, ky = ks * filter_
-        kx2, ky2 = jnp.square(kx), jnp.square(ky)
-        k2 = kx2 + ky2
-        # use this one for division
-        k2_div = 1 / jnp.square(ks).sum(0).at[0, 0].set(1)
-        k2_div = k2_div.at[0, 0].set(0) * filter_
-
-        linear_matrix = jnp.empty((*k2.shape, 2, 2), dtype=complex)
-        linear_matrix = (
-            linear_matrix.at[:, :, 0, 0].set(
-                -self.C * k2_div - self.νx * kx2 - self.νy * ky2
-            )
-            .at[:, :, 0, 1].set(self.C * k2_div)
-            .at[:, :, 1, 0].set(-1j * ky * self.κ + self.C)
-            .at[:, :, 1, 1].set(-self.C - self.Dx * kx2 - self.Dy * ky2)
-            .at[0, 0].set(0)
-        ) # yapf: disable
-
-        if self.modified: # zonal flows
-            linear_matrix = (
-                linear_matrix
-                .at[:, 0, 0, 0].set(-self.νz)
-                .at[:, 0, 0, 1].set(0)
-                .at[:, 0, 1, 0].set(0)
-                .at[:, 0, 1, 1].set(-self.Dz)
-            )
-
-        linear_matrix = make_hermitian(linear_matrix) * filter_[..., None, None]
-
-        self.filter = filter_
-        self.linear_matrix = linear_matrix
-        self.kx, self.ky = kx, ky
-        self.k2, self.k2_div = k2, k2_div
-
-    def explicit_terms(self, ŷ):
-        φh, nh = jnp.moveaxis(make_hermitian(ŷ.view(dtype=complex)), -1, 0)
-
-        dφdx, dφdy, dndx, dndy, dωdx, dωdy = jnp.fft.irfft2(
-            1j * jnp.array([
-                self.kx * φh,
-                self.ky * φh,
-                self.kx * nh,
-                self.ky * nh,
-                -self.kx * self.k2 * φh,
-                -self.ky * self.k2 * φh,
-            ]),
-            axes=(1, 2), norm="forward"
-        )
-
-        dnh, dφh = jnp.fft.rfft2(
-            jnp.array([dφdx * dndy - dφdy * dndx, dφdx * dωdy - dφdy * dωdx]),
-            axes=(1, 2), norm="forward"
-        ) * self.filter
-        term = make_hermitian(jnp.stack((dφh * self.k2_div, -dnh), axis=-1))
-
-        return term.view(dtype=float)
-
-    def implicit_terms(self, ŷ):
-        term = self.linear_matrix @ ŷ.view(dtype=complex)[..., None]
-        return make_hermitian(term.squeeze()).view(dtype=float)
-
-    def implicit_solve(self, ŷ, time_step):
-        inv = jnp.linalg.inv(jnp.eye(2) - time_step * self.linear_matrix)
-        term = inv @ ŷ.view(dtype=complex)[..., None]
-        return term.squeeze().view(dtype=float)
 
 
 @dataclasses.dataclass
@@ -150,11 +57,7 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
     modified: True
 
     def __post_init__(self):
-        padded_grid = grids.Grid(
-            shape=get_padded_shape(self.grid.shape), domain=self.grid.domain
-        )
-        filter_ = brick_wall_filter_2d(*self.grid.shape, nyquist=True)
-        self.kx, self.ky = rfft_mesh(padded_grid) * filter_
+        self.kx, self.ky = rfft_mesh(self.grid)
         kx2, ky2 = jnp.square(self.kx), jnp.square(self.ky)
         self.k2 = kx2 + ky2
         νk = self.ν * self.k2
@@ -164,7 +67,7 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         self.forcing = jnp.exp(
             -(kx2 + jnp.square(self.ky - self.force_ky)) / 2
             / jnp.square(self.force_σ)
-        ) * self.force_amplitude * filter_
+        ) * self.force_amplitude
 
         self.key = jax.random.PRNGKey(seed=self.seed)
 
@@ -172,19 +75,19 @@ class HasegawaMimaSpectral2D(time_stepping.ImplicitExplicitODE):
         φh = ŷ.view(dtype=complex)
 
         dφdx, dφdy, dωdx, dωdy = jnp.fft.irfft2(
-            1j * jnp.array([
+            fourier_pad(1j * jnp.array([
                 self.kx * φh,
                 self.ky * φh,
                 -self.kx * self.k2 * φh,
                 -self.ky * self.k2 * φh,
-            ]),
+            ])),
             axes=(1, 2),
             norm="forward"
         )
         # Poisson bracket
-        dφh = jnp.fft.rfft2(
+        dφh = fourier_unpad(jnp.fft.rfft2(
             dφdx * (dφdy-dωdy) - dφdy * (dφdx-dωdx), norm="forward"
-        )
+        ))
 
         self.key, subkey = jax.random.split(self.key)
         phase = jax.random.uniform(subkey, shape=φh.shape)
@@ -261,6 +164,7 @@ def hasegawa_mima_pspectral_2d(
             "κ": κ,
             "force_amplitude": force_amplitude,
             "force_ky": force_ky,
+            "modified": modified,
             "seed": seed,
         },
         y0=yh0.view(dtype=float),
@@ -273,6 +177,200 @@ def hasegawa_mima_pspectral_2d(
         apply=(real_to_fourier, fourier_to_real),
         split_callback=split_callback,
     )
+
+
+
+
+@dataclasses.dataclass
+class HasegawaWakataniSpectral2D(time_stepping.ImplicitExplicitODE):
+    """Breaks the Hasegawa Wakatani equation into implicit and explicit parts.
+    Implicit parts are the linear terms and explicit parts are the non-linear
+    terms.
+    Attributes:
+        grid: underlying grid of the process
+        κ: gradient of the density
+        ν: kinematic viscosity, strength of the diffusion term
+        D: diffusion coefficient
+        C: adiabatic coefficient
+    """
+
+    grid: grids.Grid
+    C: float = 1
+    D: float = None
+    Dx: float = None
+    Dy: float = None
+    Dz: float = 1e-4
+    ν: float = None
+    νx: float = None
+    νy: float = None
+    νz: float = 1e-4
+    κ: float = 1
+    modified: bool = True
+
+    def __post_init__(self):
+        ks = rfft_mesh(self.grid)
+        kx, ky = ks[:2]
+        kx2, ky2 = jnp.square(ks[:2])
+        k2 = jnp.square(ks).sum(0)
+        # use this one for division
+        k2_div = 1 / k2.at[0, 0].set(1)
+        k2_div = k2_div.at[0, 0].set(0)
+
+        if self.D is None:
+            Dk = self.Dx * kx2 + self.Dy * ky2
+        else:
+            Dk = self.D * k2
+
+        if self.ν is not None:
+            νk = self.ν * k2
+        else:
+            νk = self.νx * kx2 + self.νy * ky2
+
+
+        linear_matrix = jnp.empty((*k2.shape, 2, 2), dtype=complex)
+        linear_matrix = (
+            linear_matrix.at[..., 0, 0].set(
+                -self.C * k2_div - νk
+            )
+            .at[..., 0, 1].set(self.C * k2_div)
+            .at[..., 1, 0].set(-1j * ky * self.κ + self.C)
+            .at[..., 1, 1].set(-self.C - Dk)
+        ) # yapf: disable
+
+        if self.modified: # zonal flows
+            linear_matrix = (
+                linear_matrix
+                .at[:, 0, ..., 0, 0].set(-self.νz)
+                .at[:, 0, ..., 0, 1].set(0)
+                .at[:, 0, ..., 1, 0].set(0)
+                .at[:, 0, ..., 1, 1].set(-self.Dz)
+            )
+
+        linear_matrix = make_hermitian(linear_matrix)
+
+        self.linear_matrix = linear_matrix
+        self.kx, self.ky = kx, ky
+        self.k2, self.k2_div = k2, k2_div
+        self.fft_axes = list(range(1, 1+self.grid.ndim))
+
+    def explicit_terms(self, ŷ):
+        φh, nh = jnp.moveaxis(make_hermitian(ŷ.view(dtype=complex)), -1, 0)
+
+        dφdx, dφdy, dndx, dndy, dωdx, dωdy = jnp.fft.irfftn(
+            fourier_pad(1j * jnp.array([
+                self.kx * φh,
+                self.ky * φh,
+                self.kx * nh,
+                self.ky * nh,
+                -self.kx * self.k2 * φh,
+                -self.ky * self.k2 * φh,
+            ])),
+            axes=self.fft_axes, norm="forward"
+        )
+
+        dnh, dφh = fourier_unpad(jnp.fft.rfftn(
+            jnp.array([dφdx * dndy - dφdy * dndx, dφdx * dωdy - dφdy * dωdx]),
+            axes=self.fft_axes, norm="forward"
+        ))
+        term = make_hermitian(jnp.stack((dφh * self.k2_div, -dnh), axis=-1))
+
+        return term.view(dtype=float)
+
+    def implicit_terms(self, ŷ):
+        term = self.linear_matrix @ ŷ.view(dtype=complex)[..., None]
+        return make_hermitian(term.squeeze()).view(dtype=float)
+
+    def implicit_solve(self, ŷ, time_step):
+        inv = jnp.linalg.inv(jnp.eye(2) - time_step * self.linear_matrix)
+        term = inv @ ŷ.view(dtype=complex)[..., None]
+        return term.squeeze().view(dtype=float)
+
+
+def hasegawa_wakatani_pspectral_3d(
+    tf: float = 10,
+    grid_size: Union[int, tuple[int, int, int]] = 682,
+    domain: Union[float, tuple[float, float, float]] = 16 * jnp.pi,
+    video_length: float = 10.0,
+    video_fps: float = 20,
+    atol: float = 1e-6,
+    rtol: float = 1e-6,
+    C: float = 1,
+    κ: float = 1,
+    D: float = 1e-4,
+    Dz: float = 1e-5,
+    ν: float = 1e-4,
+    νz: float = 1e-5,
+    modified: bool = True,
+    filename: Union[str, Path] = None,
+    seed: int = 42,
+    solver: Union[str, type] = "Dopri8",
+):
+    """Hasegawa-Wakatani pseudo-spectral 3D simulation
+
+    2/3 zero padding rule is used for computing the non-linear term to avoid
+    aliasing effects.
+
+    Args:
+        tf: final time simulation
+        grid_size: shape without the padding
+        domain: box size (cartesian space)
+        video_length: length of the video (seconds)
+        video_fps: frames per second of the video
+        atol, rtol: absolute and relative tolerance
+        C: adiabatic parameter
+        κ: density gradient
+        D, Dz: diffusion coefficients (space and zonal)
+        ν, νz: viscosity coefficients (space and zonal)
+        filename: path and name of the .zarr file
+        seed: seed for generating pseudo-random number key and for reproducibility
+        solver: the solver name passed to diffeqsolve
+    """
+    (nx, ny, nz), (lx, ly, lz), grid = process_space_params(grid_size, domain, ndim=3)
+
+    C, κ, D, Dz, ν, νz = [
+        x.item() if hasattr(x, "item") else x for x in (C, κ, D, Dz, ν, νz)
+    ]
+
+    m = HasegawaWakataniSpectral2D(
+        grid, C=C, D=D, Dz=Dz, ν=ν, νz=νz, κ=κ, modified=modified
+    )
+
+    yh0 = init_fields_fourier_2d(
+        grid=grid, key=jax.random.PRNGKey(seed=seed), n=2
+    )
+
+    return simulation_base(
+        terms=get_terms(m, solver),
+        tf=tf,
+        coords={
+            "x": jnp.linspace(0, lx, nx),
+            "y": jnp.linspace(0, ly, ny),
+            "z": jnp.linspace(0, lz, nz),
+            "field": ["φ", "n"],
+        },
+        attrs={
+            "model": f"hasegawa_wakatani_pspectral_3d",
+            "grid_size": (nx, ny),
+            "domain": (lx, ly),
+            "C": C,
+            "κ": κ,
+            "D": D,
+            "Dz": Dz,
+            "ν": ν,
+            "νz": νz,
+            "modified": modified,
+            "seed": seed,
+        },
+        y0=yh0.view(dtype=float),
+        solver=solver,
+        atol=atol,
+        rtol=rtol,
+        video_length=video_length,
+        video_fps=video_fps,
+        filename=filename,
+        apply=(real_to_fourier, partial(fourier_to_real, ndim=3)),
+    )
+
 
 
 def hasegawa_wakatani_pspectral_2d(
@@ -352,6 +450,7 @@ def hasegawa_wakatani_pspectral_2d(
             "νx": νx,
             "νy": νy,
             "νz": νz,
+            "modified": modified,
             "seed": seed,
         },
         y0=yh0.view(dtype=float),
@@ -363,6 +462,7 @@ def hasegawa_wakatani_pspectral_2d(
         filename=filename,
         apply=(real_to_fourier, fourier_to_real),
     )
+
 
 
 def hasegawa_wakatani_pspectral_1d(
@@ -488,6 +588,7 @@ def hasegawa_wakatani_findiff_1d(
 
     Reduced model with a single poloidal mode using finite-difference method,
     meaning that other than periodic boundary conditions are allowed.
+    We could use (diff_fn + cg) but (diff_matrix + pinv) seems to be faster
 
     Args:
         tf: final time simulation
@@ -532,7 +633,6 @@ def hasegawa_wakatani_findiff_1d(
         for χ in (C, κ, Dx, Dy, Dz, νx, νy, νz, ky)
     ]
 
-    shape = (grid_size, )
     grid = grids.Grid((grid_size, ), domain=[(0, domain)])
 
     # initial conditions
@@ -544,7 +644,7 @@ def hasegawa_wakatani_findiff_1d(
         grid_ = grids.Grid((grid_size, 4),
                            domain=[(0, domain), (0, 2 * jnp.pi / ky)])
         y = init_fields_fourier_2d(
-            grid_, key, n=2, A=A, σ=σ, padding=False, laplacian=True
+            grid_, key, n=2, A=A, σ=σ, laplacian=True
         )
         y = jnp.fft.ifft(y, axis=0, norm="forward")
 
@@ -569,16 +669,17 @@ def hasegawa_wakatani_findiff_1d(
         nb = y[..., 5 * grid_size:]
         return Ωk, nk, Ωb, nb
 
+    def force_pad_width(vector, pad_width, iaxis, kwargs):
+        vector = vector.at[:pad_width[0]].set(vector[pad_width[0]])
+        vector = vector.at[-pad_width[1]:].set(0)
+        return vector
+
     k1, k2 = jax.random.split(key)
     if bc_name == "force":
-        dx, nz = diff_matrix(grid, axis=0, order=1, acc=acc, boundary="dirichlet")
-        ddx, nz = diff_matrix(grid, axis=0, order=2, acc=acc, boundary="dirichlet")
-        dx_force, _ = diff_matrix(
-            grid, axis=0, order=1, acc=acc, boundary="neumann", scipy_sparse=True
-        )
-        # set dirichlet at the right edge
-        dx_force[-1, :] = jnp.zeros(grid_size).at[-1].set(1)
-        dx_force = sparse.BCOO.from_scipy_sparse(dx_force)
+
+        dx = diff_fn(grid, axis=0, order=1, acc=acc, boundary="dirichlet")
+        ddx = diff_fn(grid, axis=0, order=2, acc=acc, boundary="dirichlet")
+        dx_force = diff_fn(grid, axis=0, order=1, acc=acc, boundary=force_pad_width)
 
         forcing = jnp.exp(
             -jnp.square((x - 0.1*domain) / (domain/10))
@@ -591,50 +692,58 @@ def hasegawa_wakatani_findiff_1d(
             (pad[::-1], jnp.ones(grid_size - 2*pad_size), pad)
         )
         νx_, νy_, νz_, Dx_, Dy_ = [padded * χ for χ in (νx, νy, νz, Dx, Dy)]
-        y0 = init_fields(key)
-        y0 = combine_state(*[χ.at[nz].set(0) for χ in split_state(y0)])
     else:
-        dx, nz = diff_matrix(grid, axis=0, order=1, acc=acc, boundary=bc_name)
-        ddx, nz = diff_matrix(grid, axis=0, order=2, acc=acc, boundary=bc_name)
-        dx_force = dx.todense()
+        dx = diff_fn(grid, axis=0, order=1, acc=acc, boundary=bc_name)
+        ddx = diff_fn(grid, axis=0, order=2, acc=acc, boundary=bc_name)
+        dx_force = dx
         forcing, well = 0, 0
         νx_, νy_, νz_, Dx_, Dy_ = νx, νy, νz, Dx, Dy
-        y0 = init_fields(key)
 
-    ddxk_inv = jnp.linalg.pinv(
-        ddx.todense() - jnp.eye(grid_size) * ky2, hermitian=True
-    )
-    ddx_inv = jnp.linalg.pinv(ddx.todense(), hermitian=True)
+    mode = {
+        "periodic": "wrap",
+        "dirichlet": "constant",
+        "neumann": "edge",
+        "force": force_pad_width,
+    }[bc_name]
+
+    if bc_name == "periodic":
+        ddx_mat = diff_matrix(grid, axis=0, order=2, acc=acc, padding=False).todense()
+        def get_φ(Ωk, Ωb):
+            return ddxk_inv @ Ωk, ddx_inv @ Ωb
+    else:
+        ddx_mat = diff_matrix(grid, axis=0, order=2, acc=acc, padding=True).todense()
+        def get_φ(Ωk, Ωb):
+            φk = ddxk_inv @ jnp.pad(Ωk, acc//2, mode=mode)
+            φb = ddx_inv @ jnp.pad(Ωb, acc//2, mode=mode)
+            return  jnp.array([φk, φb])[:, acc//2:-acc//2]
+
+    y0 = init_fields(key)
+
+    select = (ddx_mat.shape[0] - grid_size) // 2
+    select = slice(select, select + grid_size)
+    ky2_mat = jnp.zeros(ddx_mat.shape)
+    ky2_mat = ky2_mat.at[select, select].set(jnp.eye(grid_size) * ky2)
+
+    ddxk_inv = jnp.linalg.pinv(ddx_mat - ky2_mat, hermitian=True)
+    ddx_inv = jnp.linalg.pinv(ddx_mat, hermitian=True)
 
     def term(t, y, args):
         Ωk, nk, Ωb, nb = split_state(y)
-        φk, φb = ddxk_inv @ Ωk, ddx_inv @ Ωb
-
-        if bc_name == "neumann":
-            Ωk, nk, φk, Ωb, nb, φb = [
-                χ.at[0].set(χ[1]).at[-1].set(χ[-2]) for χ in (Ωk, nk, φk, Ωb, nb, φb)
-            ]
-        elif bc_name == "dirichlet":
-            Ωk, nk, φk, Ωb, nb, φb = [χ.at[nz].set(0) for χ in (Ωk, nk, φk, Ωb, nb, φb)]
-        elif bc_name == "force":
-            Ωk, nk, φk = [χ.at[nz].set(0) for χ in (Ωk, nk, φk)]
-            Ωb, nb, φb = [χ.at[0].set(χ[1]).at[-1].set(0) for χ in (Ωb, nb, φb)]
+        φk, φb = get_φ(Ωk, Ωb)
 
         φc = jnp.conjugate(φk)
-        dφbdx = dx_force @ φb
+        dφbdx = dx_force(φb)
         c_term = C * (φk-nk)
 
-        dΩk = c_term + νx*ddx@Ωk - νy*ky2*Ωk - 1j * ky * (
-            dφbdx*Ωk - (dx_force@Ωb) * φk
+        dΩk = c_term + νx*ddx(Ωk) - νy*ky2*Ωk - 1j * ky * (
+            dφbdx*Ωk - dx_force(Ωb) * φk
         )
-        dnk = c_term + Dx*ddx@nk - Dy*ky2*nk - 1j * ky * (
-            dφbdx*nk + (κ - dx_force@nb) * φk
+        dnk = c_term + Dx*ddx(nk) - Dy*ky2*nk - 1j * ky * (
+            dφbdx*nk + (κ - dx_force(nb)) * φk
         )
-        dΩb = 2 * ky * dx @ jnp.imag(φc * Ωk) - νz*Ωb
-        dnb = 2 * ky * dx @ jnp.imag(φc * nk) - (Dz+well) * nb + forcing
+        dΩb = 2 * ky * dx(jnp.imag(φc * Ωk)) - νz*Ωb
+        dnb = 2 * ky * dx(jnp.imag(φc * nk)) - (Dz+well) * nb + forcing
 
-        if bc_name != "periodic":
-            dΩk, dnk, dΩb, dnb = [χ.at[nz].set(0) for χ in (dΩk, dnk, dΩb, dnb)]
         return combine_state(dΩk, dnk, dΩb, dnb)
 
     def decompose(t, y, args=None):
@@ -692,6 +801,8 @@ def hasegawa_wakatani_findiff_1d(
     )
 
 
+
+
 def hasegawa_wakatani_findiff_2d(
     tf: float = 10,
     grid_size: Union[int, tuple[int, int]] = 128,
@@ -721,25 +832,25 @@ def hasegawa_wakatani_findiff_2d(
 
     (nx, ny), (lx, ly), grid = process_space_params(grid_size, domain)
 
-    diff_matrix_kwargs = {
+    diff_fn_kwargs = {
         "grid": grid,
         "acc": acc,
         "boundary": boundary,
     }
 
     if not arakawa:
-        dx_bcoo, nz = diff_matrix(axis=0, order=1, **diff_matrix_kwargs)
+        dx = diff_fn(axis=0, order=1, **diff_fn_kwargs)
+    else:
+        _arakawa = arakawa_fn(grid, boundary)
 
-    dy_bcoo, nz = diff_matrix(axis=1, order=1, **diff_matrix_kwargs)
-    Δ_bcoo, nz = diff_matrix(axis=[0, 1], order=2, **diff_matrix_kwargs)
-    Δ_matmul = jax.tree_util.Partial(sparse.sparsify(jnp.matmul), Δ_bcoo)
+    dy = diff_fn(axis=1, order=1, **diff_fn_kwargs)
+    laplacian = diff_fn(axis=[0, 1], order=2, **diff_fn_kwargs)
 
     if boundary == "periodic":
         y0 = init_fields_fourier_2d(
             grid,
             key=jax.random.PRNGKey(seed=seed),
             n=2,
-            padding=False,
             laplacian=True
         )
         y0 = jnp.fft.irfft2(y0, axes=(0, 1), norm="forward")
@@ -751,51 +862,14 @@ def hasegawa_wakatani_findiff_2d(
         ) * 1e-2
         Ω = jnp.zeros(grid.shape)
         y0 = jnp.stack([Ω, n], axis=-1)
-        y0 = y0.reshape(-1, 2).at[nz].set(0).reshape(nx, ny, 2)
 
-    def dx(y):
-        return (dx_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
-
-    def dy(y):
-        return (dy_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
-
-    def laplacian(y):
-        return (Δ_bcoo @ y.reshape(*y.shape[:-2], -1, 1)).reshape(*y.shape)
-
-    arakawa_norm = 12 * jnp.prod(jnp.array(grid.step))
-    def _arakawa(ζ, ψ):
-        ζψ = jnp.array([ζ, ψ])
-        ζ_east, ψ_east = jnp.roll(ζψ, -1, axis=1)
-        ζ_west, ψ_west = jnp.roll(ζψ, 1, axis=1)
-        ζ_north, ψ_north = jnp.roll(ζψ, -1, axis=2)
-        ζ_south, ψ_south = jnp.roll(ζψ, 1, axis=2)
-        ζ_ne, ψ_ne = jnp.roll(ζψ, (-1, -1), axis=(1, 2))
-        ζ_se, ψ_se = jnp.roll(ζψ, (-1, 1), axis=(1, 2))
-        ζ_sw, ψ_sw = jnp.roll(ζψ, (1, 1), axis=(1, 2))
-        ζ_nw, ψ_nw = jnp.roll(ζψ, (1, -1), axis=(1, 2))
-
-        return (
-            ζ_east * (ψ_north - ψ_south + ψ_ne - ψ_se)
-            - ζ_west * (ψ_north - ψ_south + ψ_nw - ψ_sw)
-            - ζ_north * (ψ_east - ψ_west + ψ_ne - ψ_nw)
-            + ζ_south * (ψ_east - ψ_west + ψ_se - ψ_sw)
-            + ζ_se * (ψ_east - ψ_south)
-            + ζ_ne * (ψ_north - ψ_east)
-            - ζ_nw * (ψ_north - ψ_west)
-            - ζ_sw * (ψ_west - ψ_south)
-        ) / arakawa_norm
 
     def term(t, y, args):
         Ω, n = y[..., 0], y[..., 1]
         φ = jax.scipy.sparse.linalg.cg(
-            Δ_matmul, Ω.ravel(), tol=rtol
-        )[0].reshape(nx, ny)
+            laplacian, Ω, tol=rtol
+        )[0]
         Ωnφ = jnp.array([Ω, n, φ])
-
-        if boundary == "dirichlet":
-            Ωnφ = Ωnφ.reshape(3, -1).at[:, nz].set(0).reshape(3, nx, ny)
-        elif boundary == "neumann":
-            Ωnφ = set_neumann(Ωnφ, axes=(1, 2))
 
         if modified:
             Ωb, nb, φb = Ωnφ.mean(-1, keepdims=True)
@@ -817,8 +891,6 @@ def hasegawa_wakatani_findiff_2d(
             poisson_Ω = dφdx*dΩdy - dφdy*dΩdx
             poisson_n = dφdx*dndy - dφdy*dndx
 
-
-
         term = jnp.stack(
             arrays=[
                 c_term + ν*ΔΩt - νz*Ωb - poisson_Ω,
@@ -826,10 +898,6 @@ def hasegawa_wakatani_findiff_2d(
             ],
             axis=-1
         )
-
-        if boundary != "periodic":
-            # make sure the values at the boundaries don't change
-            term = term.reshape(-1, 2).at[nz].set(0).reshape(nx, ny, 2)
 
         return term
 
@@ -854,7 +922,8 @@ def hasegawa_wakatani_findiff_2d(
             "boundary": boundary,
             "acc": acc,
             "seed": seed,
-            "acc": acc,
+            "arakawa": arakawa,
+            "modified": modified,
         },
         y0=y0,
         solver=solver,
@@ -864,3 +933,6 @@ def hasegawa_wakatani_findiff_2d(
         video_fps=video_fps,
         filename=filename,
     )
+
+
+
