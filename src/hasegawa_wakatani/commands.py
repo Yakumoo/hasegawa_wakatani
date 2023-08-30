@@ -4,10 +4,13 @@ import shutil
 import xarray as xr
 
 from hasegawa_wakatani.models import (
-    hasegawa_wakatani_pspectral_1d, hasegawa_wakatani_findiff_1d
+    hasegawa_wakatani_pspectral_1d,
+    hasegawa_wakatani_findiff_1d,
 )
 from hasegawa_wakatani.plots import (
-    pcolor_compare_1d, plot_profiles_compare_1d, pcolor_compare_1d_params
+    pcolor_compare_1d,
+    plot_profiles_compare_1d,
+    pcolor_compare_1d_params,
 )
 
 
@@ -65,20 +68,23 @@ def compare_1d(
     plot_profiles_compare_1d(da, path)
 
 
-def compare_1d_params(Cs=[1e-1, 1, 1e1], κs=[1e-1, 1, 1e1], filename=Path(__file__).parents[2] / "workspace" / "compare_1d_params"):
-
+def compare_1d_params(
+    Cs=[1e-1, 1, 1e1],
+    κs=[1e-1, 1, 1e1],
+    filename=Path(__file__).parents[2] / "workspace" / "compare_1d_params",
+):
+    """Run compare_1d with different values of C and κ"""
     path = Path(filename)
     path.mkdir(parents=True, exist_ok=True)
     das = []
     for C, κ in [(C, κ) for C in Cs for κ in κs]:
         params_name = f"C={C}_κ={κ}"
         compare_1d(C=C, κ=κ, filename=path / params_name)
-        with xr.open_dataarray(path / params_name / f"{params_name}.zarr",
-                               engine="zarr") as da:
+        with xr.open_dataarray(
+            path / params_name / f"{params_name}.zarr", engine="zarr"
+        ) as da:
             [da.attrs.pop(k) for k in ("C", "κ", "filename")]
-            das.append(
-                da.expand_dims(dim={"param": [params_name.replace("_", " ")]})
-            )
+            das.append(da.expand_dims(dim={"param": [params_name.replace("_", " ")]}))
         shutil.rmtree(path / params_name, ignore_errors=True)
 
     da = xr.concat(das, dim="param")

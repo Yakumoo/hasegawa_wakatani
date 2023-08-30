@@ -12,7 +12,12 @@ import jax
 import jax.numpy as jnp
 import jax_cfd.base.grids as grids
 
-from hasegawa_wakatani.utils import open_with_vorticity, gridmesh_from_da, rfft_mesh, append_total_1d
+from hasegawa_wakatani.utils import (
+    open_with_vorticity,
+    gridmesh_from_da,
+    rfft_mesh,
+    append_total_1d,
+)
 
 
 def visualization_2d(filename):
@@ -36,8 +41,8 @@ def animation_2d(x, fields=["Ω", "n"]):
 
     fig, axes = plt.subplots(1, len(fields), figsize=(10, 5))
     images = [
-        ax.imshow(da.sel(time=0, field=field), rasterized=True) for field,
-        ax in zip(fields, axes)
+        ax.imshow(da.sel(time=0, field=field), rasterized=True)
+        for field, ax in zip(fields, axes)
     ]
     for image, field, ax in zip(images, fields, axes):
         image.set(cmap="seismic")
@@ -52,9 +57,7 @@ def animation_2d(x, fields=["Ω", "n"]):
     )
     colorbar.formatter.set_powerlimits((0.1, 10))
     fig.tight_layout()
-    args = {
-        "vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()
-    }
+    args = {"vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()}
 
     def init():
         return images
@@ -62,7 +65,7 @@ def animation_2d(x, fields=["Ω", "n"]):
     def update(frame, args):
         y = da.isel(time=frame)
         vmax = jnp.abs(jnp.array(y.sel(field=fields))).max()
-        vmax = 0.2*vmax + 0.8 * args["vmax_last"]
+        vmax = 0.2 * vmax + 0.8 * args["vmax_last"]
         args["vmax_last"] = vmax
         for image, field in zip(images, fields):
             image.set(data=y.sel(field=field).T, clim=(-vmax, vmax))
@@ -86,10 +89,7 @@ def animation_2d(x, fields=["Ω", "n"]):
     }
 
     with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
-        ani.save(
-            Path(x).with_suffix(".mp4"),
-            writer=FFMpegWriter(fps=video_fps)
-        )
+        ani.save(Path(x).with_suffix(".mp4"), writer=FFMpegWriter(fps=video_fps))
     fig.savefig(Path(x).with_name("last_frame.pdf"), dpi=100)
 
 
@@ -136,30 +136,34 @@ def plot_time_frames_2d(filename, frames=[0, 0.25, 0.5, 1]):
 
 def plot_spectrum(filenames, n_last_frames=100):
     """Plot the energy-k spectrum in log-log scale
-    
+
     The energy is averaged on the `n_last_frames` last frames of the simulaton
     """
 
-    filenames_ = filenames if isinstance(filenames,
-                                         (list, tuple)) else [filenames]
+    filenames_ = filenames if isinstance(filenames, (list, tuple)) else [filenames]
     fig, ax = plt.subplots(figsize=(4, 3))
     for i, filename in enumerate(filenames_):
         da = open_with_vorticity(filename)
-        grid, (kx, ky) = gridmesh_from_da(da)
-        k2 = jnp.square(kx) + jnp.square(ky)
+        grid, ks = gridmesh_from_da(da)
+        k2 = jnp.square(ks).sum(0)
         k = jnp.sqrt(k2)
-        dk = kx[1, 0] - kx[0, 0]
+        kx = ks[0]
+        dk = 2 * jnp.pi / da.attrs["domain"][0]
         kn = jnp.arange(dk, kx.max(), 2 * dk)
 
         y = da.isel(time=slice(-n_last_frames, None)).sel(field="Ω")
         # convert to φk
-        y = -jnp.fft.rfft2(jnp.array(y), norm="forward") / k2.at[0, 0].set(1)
+        y = -jnp.fft.rfftn(
+            jnp.array(y), norm="forward", axes=np.arange(grid.ndim) + 1
+        ) / k2.at[0, 0].set(1)
         y = k2 * jnp.square(jnp.abs(y)).mean(0) / 2
         y = jax.vmap(
             fun=lambda j: jnp.where(
-                condition=(kn[j] - dk < k) &(k < kn[j] + dk), x=y, y=0
+                condition=(kn[j] - dk < k) & (k < kn[j] + dk), x=y, y=0
             ).sum()
-        )(jnp.arange(kn.size)) # yapf: disable
+        )(
+            jnp.arange(kn.size)
+        )  # yapf: disable
         # En = jnp.array([Ek[(kn[j] - dk < k) & (k < kn[j] + dk)].sum() for j in range(kn.size)])
         ax.loglog(kn, y, label=f"{Path(filename).stem}")
     ax.set(
@@ -169,9 +173,7 @@ def plot_spectrum(filenames, n_last_frames=100):
     ax.legend()
     fig.tight_layout()
     fig.savefig(
-        Path(filename).with_name("spectrum.pdf"),
-        bbox_inches="tight",
-        pad_inches=0
+        Path(filename).with_name("spectrum.pdf"), bbox_inches="tight", pad_inches=0
     )
 
 
@@ -186,25 +188,23 @@ def last_1d_to_2d(filename):
     kx_squared, ky_squared = rfft_mesh(grid)
     ky_id = jnp.argmin(jnp.abs(ky_squared[0] - 2 * jnp.pi / Ly))
     mask = jnp.zeros_like(kx_squared).at[:, 0].set(1).at[:, ky_id].set(1)
-    Ωk_squared = jnp.zeros_like(
-        kx_squared, dtype=complex
-    ).at[:, 0].set(Ωk[:, 0]).at[:, ky_id].set(Ωk[:, 1])
+    Ωk_squared = (
+        jnp.zeros_like(kx_squared, dtype=complex)
+        .at[:, 0]
+        .set(Ωk[:, 0])
+        .at[:, ky_id]
+        .set(Ωk[:, 1])
+    )
     Ω = jnp.fft.irfft2(Ωk_squared)
     fig, ax = plt.subplots(figsize=(3, 3))
     ax.imshow(Ω.T, rasterized=True, cmap="seismic")
-    ax.set(
-        xticks=[],
-        yticks=[],
-        xlabel="x",
-        ylabel="y",
-        title=f"Ω, t={da.attrs['tf']}"
-    )
+    ax.set(xticks=[], yticks=[], xlabel="x", ylabel="y", title=f"Ω, t={da.attrs['tf']}")
     fig.tight_layout()
     fig.savefig(
         file_path.with_name(f"{file_path.stem}_1d_to_2d.pdf"),
         dpi=200,
         bbox_inches="tight",
-        pad_inches=0
+        pad_inches=0,
     )
 
 
@@ -218,7 +218,7 @@ def plot_history_1d(filename):
 
     # plot history
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    x = (da.coords["x"].values, )
+    x = (da.coords["x"].values,)
     t = da.coords["time"].values
     for i, field_name in enumerate(("Ω", "n")):
         v = da.sel(field=field_name, y=0)
@@ -231,10 +231,7 @@ def plot_history_1d(filename):
 
     file_path = Path(filename)
     fig.savefig(
-        file_path.with_suffix(".pdf"),
-        dpi=200,
-        bbox_inches="tight",
-        pad_inches=0
+        file_path.with_suffix(".pdf"), dpi=200, bbox_inches="tight", pad_inches=0
     )
 
 
@@ -246,7 +243,7 @@ def plot_pspectral_1d(filename):
 
 
 def plot_components_1d(filename, tlim=None, xlim=None):
-    """Plot the components 
+    """Plot the components
 
     Plot Real(Xk) and Xb where X = Xb + Xk*exp(1j*ky*y) + conjugate(Xk)*exp(-1j*ky*y)
     is the single poloidal field
@@ -277,13 +274,12 @@ def plot_components_1d(filename, tlim=None, xlim=None):
         col_wrap=3,
         rasterized=True,
         vmax=abs(da.sel(field="Ωb")).max(),
-        cmap="seismic"
+        cmap="seismic",
     )
     if boundary[0] == "force":
         ax = g.axs.flat[-2]
-        forcing = (
-            jnp.exp(-jnp.square((x - 0.1*domain) / (domain/10)))
-            * float(boundary[1])
+        forcing = jnp.exp(-jnp.square((x - 0.1 * domain) / (domain / 10))) * float(
+            boundary[1]
         )
         forcing -= forcing[::-1]  # show the well
         forcing -= forcing.min()
@@ -292,19 +288,14 @@ def plot_components_1d(filename, tlim=None, xlim=None):
         ax.legend(fontsize="small")
 
     ax = g.axs.flat[-1]
-    n_profil = (
-        g.data.isel(time=-1).sel(field="n") + da.attrs["κ"] * (domain-x)
-    )
+    n_profil = g.data.isel(time=-1).sel(field="n") + da.attrs["κ"] * (domain - x)
     n_profil -= n_profil.min()
     n_profil *= tf / n_profil.max()
     ax.plot(x, n_profil, label="profile")
     ax.legend(fontsize="small", loc="lower left")
 
     g.fig.savefig(
-        file_path.with_suffix(".pdf"),
-        dpi=200,
-        bbox_inches="tight",
-        pad_inches=0
+        file_path.with_suffix(".pdf"), dpi=200, bbox_inches="tight", pad_inches=0
     )
     return g
 
@@ -317,42 +308,44 @@ def pcolor_compare_1d(da, directory):
         col="field",
         rasterized=True,
         vmax=abs(da.sel(field="Ωb")).max(),
-        cmap="seismic"
+        cmap="seismic",
     )
     g.fig.savefig(
         Path(directory) / "compare_1d_pcolor.pdf",
         dpi=100,
         bbox_inches="tight",
-        pad_inches=0
+        pad_inches=0,
     )
 
 
 def plot_profiles_compare_1d(da, directory, ts=None):
     if ts is None:
         ts = jnp.linspace(0, da.attrs["tf"], 5)[1:]
-    g = append_total_1d(da).sel(
-        time=ts, method="nearest"
-    ).drop_sel(field=["Ω", "n"]).plot.line(
-        x="x",
-        hue="method",
-        row="field",
-        col="time",
-        sharey=False,
-        linestyle=(0, (5, 1)),
+    g = (
+        append_total_1d(da)
+        .sel(time=ts, method="nearest")
+        .drop_sel(field=["Ω", "n"])
+        .plot.line(
+            x="x",
+            hue="method",
+            row="field",
+            col="time",
+            sharey=False,
+            linestyle=(0, (5, 1)),
+        )
     )
     g.fig.savefig(
-        Path(directory) / "compare_1d_profiles.pdf",
-        bbox_inches="tight",
-        pad_inches=0
+        Path(directory) / "compare_1d_profiles.pdf", bbox_inches="tight", pad_inches=0
     )
 
 
 def pcolor_compare_1d_params(da, directory):
     melted = append_total_1d(da).drop_sel(field=["Ω", "n"])
-    das = [ # melt method into field
-        melted.sel({"method": m}).assign_coords({
-            "field": [f+f" {m}" for f in melted.coords["field"].values]
-        }) for m in ("pspectral", "findiff")
+    das = [  # melt method into field
+        melted.sel({"method": m}).assign_coords(
+            {"field": [f + f" {m}" for f in melted.coords["field"].values]}
+        )
+        for m in ("pspectral", "findiff")
     ]
     melted = xr.concat(das, dim="field")
 
@@ -371,7 +364,7 @@ def pcolor_compare_1d_params(da, directory):
                 vmax=vmax,
                 cmap="seismic",
                 ax=ax[j],
-                add_colorbar=False
+                add_colorbar=False,
             )
             if j == 1:
                 cbar = g.fig.colorbar(
@@ -382,7 +375,7 @@ def pcolor_compare_1d_params(da, directory):
                 )
             ax[j].set(title=None, xlabel=None, ylabel=None)
 
-    g.set_titles(template='{value}')
+    g.set_titles(template="{value}")
     g.set_xlabels(label="x")
     g.set_ylabels(label="time")
     g.fig.tight_layout()
@@ -390,49 +383,52 @@ def pcolor_compare_1d_params(da, directory):
         Path(directory) / "compare_1d_params_pcolor.pdf",
         dpi=100,
         bbox_inches="tight",
-        pad_inches=0
+        pad_inches=0,
     )
+
 
 def plot_metrics(filename):
     da = open_with_vorticity(filename)
     dim = {"x", "y", "z"}.intersection(set(da.dims))
 
     grid, ks = gridmesh_from_da(da)
-    k2 = jnp.square(ks).sum(0).at[0,0].set(1)
-    axes = np.array(range(1, len(dim)+1))
+    k2 = jnp.square(ks).sum(0).at[0, 0].set(1)
+    axes = np.array(range(len(dim))) + 1
     fft_kwargs = dict(axes=axes, norm="forward")
-    φk = - jnp.fft.rfft2(jnp.array(da.sel(field="Ω")), axes=axes, norm="forward") / k2
-    v2 = jnp.square(jnp.fft.irfft2(1j*ks[:, None]*φk, axes=axes+1, norm="forward")).sum(0)
-
+    φk = -jnp.fft.rfftn(jnp.array(da.sel(field="Ω")), axes=axes, norm="forward") / k2
+    v2 = jnp.square(
+        jnp.fft.irfftn(1j * ks[:, None] * φk, axes=axes + 1, norm="forward")
+    ).sum(0)
 
     if "n" in da.coords["field"]:
-        enstrophy = (da.sel(field="n") - da.sel(field="Ω"))**2
+        enstrophy = (da.sel(field="n") - da.sel(field="Ω")) ** 2
         enstrophy = enstrophy.mean(dim=dim) / 2
-        
+
         energy = jnp.square(jnp.array(da.sel(field="n"))) + v2
         energy = energy.mean(axes) / 2
 
         data = [energy, enstrophy]
         metric_names = ["energy", "enstrophy"]
-    else: # hasegawa-mima
+    else:  # hasegawa-mima
         data = [v2.mean(axes)]
         metric_names = ["energy"]
 
-    
     xr.DataArray(
         data=data,
         dims=["metric", "time"],
-        coords={"metric": metric_names, "time": da.coords["time"]}
+        coords={"metric": metric_names, "time": da.coords["time"]},
     ).plot(x="time", hue="metric")
-    
+
     plt.savefig(
-        Path(filename).with_name("metrics.pdf"),
-        bbox_inches="tight",
-        pad_inches=0
+        Path(filename).with_name("metrics.pdf"), bbox_inches="tight", pad_inches=0
     )
 
+
 def visualization_3d(filename):
+    plot_metrics(filename)
     animation_3d(filename)
+    plot_spectrum(filename)
+
 
 def animation_3d(filename, fields=["Ω", "n"]):
     """Create a .mp4 video of the 2D simulation"""
@@ -445,15 +441,20 @@ def animation_3d(filename, fields=["Ω", "n"]):
     video_nframes = len(da)
     video_fps = da.attrs["video_fps"]
     tf = da.coords["time"].values[-1]
+    grid_size = da.attrs["grid_size"]
+    domain = da.attrs["domain"]
 
-    x, y, z = [da.coords[x].values for x in ("x", "y", "z")]
+    x, y, z = [np.linspace(0, l, n + 1) for n, l in zip(grid_size, domain)]
 
-    fig, axes = plt.subplots(1, len(fields), figsize=(10, 5), subplot_kw=dict(projection="3d"))
-    cmap = plt.cm.seismic
+    fig, axes = plt.subplots(
+        1, len(fields), figsize=(10, 5), subplot_kw=dict(projection="3d")
+    )
+    m = plt.cm.ScalarMappable(cmap="seismic")
+    slices = [x.max(), y.min(), z.max()]
     images = []
     for i, field in enumerate(fields):
         da_sel = da.sel(time=0, field=field)
-        for j, slice_value in enumerate([x.max(), 0, z.max()]):
+        for j, slice_value in enumerate(slices):
             dim_name = ["x", "y", "z"][j]
             xyz = [x, y, z]
             xyz.pop(j)
@@ -461,44 +462,47 @@ def animation_3d(filename, fields=["Ω", "n"]):
             xyz.insert(j, np.ones(xyz[0].shape) * slice_value)
             polyc = axes[i].plot_surface(
                 *xyz,
-                facecolors=cmap(da_sel.sel({dim_name: slice_value})),
-                cmap="seismic"
+                rstride=1,
+                cstride=1,
+                linewidth=0,
+                antialiased=True,
+                rasterized=True,
             )
             images.append(polyc)
-    
+
     for image, field, ax in zip(images, fields, axes):
-        # image.set(cmap="seismic")
-        ax.set(title=field, xticks=[], yticks=[])
+        ax.set(title=field, xticks=[], yticks=[], zticks=[])
+
     text_time = fig.text(0.5, 0.96, "")
     colorbar = fig.colorbar(
-        images[1],
+        images[-1],
         ax=axes,
         location="right",
         pad=0,
         cax=ax.inset_axes([1.01, 0, 0.02, 1]),
     )
-    colorbar.formatter.set_powerlimits((0.1, 10))
     fig.tight_layout()
-    args = {
-        "vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()
-    }
+    args = {"vmax_last": jnp.abs(jnp.array(da.sel(time=0, field=fields))).max()}
 
     def init():
         return images
 
     def update(frame, args):
-        y = da.isel(time=frame)
-        vmax = jnp.abs(jnp.array(y.sel(field=fields))).max()
-        vmax = 0.2*vmax + 0.8 * args["vmax_last"]
+        y = da.isel(time=frame).sel(field=fields)
+        vmax = jnp.abs(jnp.array(y)).max()
+        vmax = 0.2 * vmax + 0.8 * args["vmax_last"]
         args["vmax_last"] = vmax
+        m.set_clim(vmin=-vmax, vmax=vmax)
+
         for i, field in enumerate(fields):
-            da_sel = da.isel(time=frame).sel(field=field)
-            for j, slice_value in enumerate([x.max(), 0, z.max()]):
-                images[i*len(fields)+j].set(
-                    facecolors=cmap(da_sel.sel({["x", "y", "z"][j]: slice_value})),
-                    clim=(-vmax, vmax),
+            for j, slice_value in enumerate(slices):
+                array = y.sel({["x", "y", "z"][j]: slice_value, "field": field})
+                images[i * 3 + j].set(
+                    facecolors=m.to_rgba(array.to_numpy().T.ravel()),
                 )
-        colorbar.update_normal(image.colorbar.mappable)
+
+        colorbar.update_normal(m)
+        colorbar.formatter.set_powerlimits((0.1, 10))
         pbar.update(1)
         text_time.set_text(f"Time={frame / video_nframes * tf:.3f}")
         return images
@@ -518,10 +522,5 @@ def animation_3d(filename, fields=["Ω", "n"]):
     }
 
     with tqdm.auto.tqdm(**tqdm_kwargs) as pbar:
-        ani.save(
-            Path(filename).with_suffix(".mp4"),
-            writer=FFMpegWriter(fps=video_fps)
-        )
+        ani.save(Path(filename).with_suffix(".mp4"), writer=FFMpegWriter(fps=video_fps))
     fig.savefig(Path(filename).with_name("last_frame.pdf"), dpi=100)
-
-

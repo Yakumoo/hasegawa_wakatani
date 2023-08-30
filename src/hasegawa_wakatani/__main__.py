@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# yapf main.py -i --style='{DEDENT_CLOSING_BRACKETS = true, COALESCE_BRACKETS = true, ARITHMETIC_PRECEDENCE_INDICATION = true, SPLIT_ALL_TOP_LEVEL_COMMA_SEPARATED_VALUES = true, SPLIT_BEFORE_ARITHMETIC_OPERATOR = true, SPLIT_BEFORE_DOT = true, SPLIT_BEFORE_EXPRESSION_AFTER_OPENING_PAREN = true, SPLIT_BEFORE_FIRST_ARGUMENT = true}'
-
 from inspect import signature
 from pathlib import Path
 from argparse import ArgumentParser
@@ -16,15 +14,13 @@ jax.config.update("jax_debug_nans", True)
 
 
 def main():
-
     parser = ArgumentParser(
         prog="hasegawa_wakatani_simulation",
-        description=
-        """Script for running Hasegawa-Wakatani simulations, saving and/or plotting. The implemented models are :
+        description="""Script for running Hasegawa-Wakatani simulations, saving and/or plotting. The implemented models are :
         - hasegawa_mima_pspectral_2d  
-        - hasegawa_wakatani_pspectral_{1,2}d
+        - hasegawa_wakatani_pspectral_{1,2,3}d
         - hasegawa_wakatani_findiff_{1,2}d
-        """
+        """,
     )
     parser.add_argument(
         "filename_or_command",
@@ -32,7 +28,7 @@ def main():
         help="""
         The input filename (.yaml or .zarr) or the command to execute. Possible commands are:
         - compare_1d: executes the single poloidal mode simulations with pseudo-spectral and finite difference methods with the same parameters
-        """
+        """,
     )
     parser.add_argument("--tf", type=float, help="Final simulation time")
     parser.add_argument("--grid_size", type=int, help="Simulation resolution")
@@ -40,20 +36,12 @@ def main():
     parser.add_argument("--C", type=float, help="Adiabatic parameter")
     parser.add_argument("--κ", type=float, help="Grandient density")
     parser.add_argument(
-        "--tol",
-        type=float,
-        help="Tolerance for the time stepping, atol=rtol=tol"
+        "--tol", type=float, help="Tolerance for the time stepping, atol=rtol=tol"
     )
+    parser.add_argument("--video_length", type=float, help="Video length of the output")
+    parser.add_argument("--video_fps", type=float, help="Video fps of the output")
     parser.add_argument(
-        "--video_length", type=float, help="Video length of the output"
-    )
-    parser.add_argument(
-        "--video_fps", type=float, help="Video fps of the output"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        help="Seed of the simulation (for the initial state)"
+        "--seed", type=int, help="Seed of the simulation (for the initial state)"
     )
     parser.add_argument(
         "--acc", type=int, help="Accuracy of the finite difference method"
@@ -61,7 +49,7 @@ def main():
     parser.add_argument(
         "--boundary",
         type=str,
-        help="Boundary conditions (finite difference method only)"
+        help="Boundary conditions (finite difference method only)",
     )
     parser.add_argument("--νx", type=float, help="Viscosity x direction")
     parser.add_argument("--νy", type=float, help="Viscosity y direction")
@@ -81,7 +69,6 @@ def main():
         action="store_true",
         help="Run in eager mode / disable jit for debugging",
     )
-    # parser.add_argument("--double", action="store_true", help="Enable 64 double precision")
     args = parser.parse_args()
 
     if args.cpu:
@@ -96,31 +83,43 @@ def main():
         hasegawa_wakatani_pspectral_2d,
         hasegawa_wakatani_pspectral_1d,
         hasegawa_wakatani_findiff_1d,
-        hasegawa_wakatani_findiff_2d
+        hasegawa_wakatani_findiff_2d,
     )
-    from hasegawa_wakatani.plots import (visualization_3d, visualization_2d, plot_pspectral_1d, plot_components_1d)
-    from hasegawa_wakatani.commands import (compare_1d, compare_1d_params)
+    from hasegawa_wakatani.plots import (
+        visualization_3d,
+        visualization_2d,
+        plot_pspectral_1d,
+        plot_components_1d,
+    )
+    from hasegawa_wakatani.commands import compare_1d, compare_1d_params
 
     schemes = {
-        "hasegawa_mima_pspectral_2d":
-        (hasegawa_mima_pspectral_2d, visualization_2d),
-        "hasegawa_wakatani_pspectral_3d":
-        (hasegawa_wakatani_pspectral_3d, visualization_3d),
-        "hasegawa_wakatani_pspectral_2d":
-        (hasegawa_wakatani_pspectral_2d, visualization_2d),
-        "hasegawa_wakatani_pspectral_1d":
-        (hasegawa_wakatani_pspectral_1d, plot_pspectral_1d),
-        "hasegawa_wakatani_findiff_1d":
-        (hasegawa_wakatani_findiff_1d, plot_components_1d),
-        "hasegawa_wakatani_findiff_2d":
-        (hasegawa_wakatani_findiff_2d, visualization_2d),
+        "hasegawa_mima_pspectral_2d": (hasegawa_mima_pspectral_2d, visualization_2d),
+        "hasegawa_wakatani_pspectral_3d": (
+            hasegawa_wakatani_pspectral_3d,
+            visualization_3d,
+        ),
+        "hasegawa_wakatani_pspectral_2d": (
+            hasegawa_wakatani_pspectral_2d,
+            visualization_2d,
+        ),
+        "hasegawa_wakatani_pspectral_1d": (
+            hasegawa_wakatani_pspectral_1d,
+            plot_pspectral_1d,
+        ),
+        "hasegawa_wakatani_findiff_1d": (
+            hasegawa_wakatani_findiff_1d,
+            plot_components_1d,
+        ),
+        "hasegawa_wakatani_findiff_2d": (
+            hasegawa_wakatani_findiff_2d,
+            visualization_2d,
+        ),
     }
-    commands = {
-        "compare_1d": compare_1d, "compare_1d_params": compare_1d_params
-    }
+    commands = {"compare_1d": compare_1d, "compare_1d_params": compare_1d_params}
 
     simulation_kwargs = {}
-    for k in set(vars(args).keys()) - {'cpu', 'eager', 'filename_or_command'}:
+    for k in set(vars(args).keys()) - {"cpu", "eager", "filename_or_command"}:
         v = getattr(args, k, None)
         if v is not None:
             simulation_kwargs[k] = v
@@ -143,9 +142,9 @@ def main():
 
         model = [k for k in schemes if k in yaml_data][0]
         simulation, post_process = schemes[model]
-        simulation_kwargs = {
-            "filename": p.with_suffix(".zarr")
-        } | yaml_data[model] | simulation_kwargs
+        simulation_kwargs = (
+            {"filename": p.with_suffix(".zarr")} | yaml_data[model] | simulation_kwargs
+        )
 
         simulation(**simulation_kwargs)
         post_process(simulation_kwargs["filename"])
@@ -158,10 +157,12 @@ def main():
         simulation, post_process = schemes[model]
         # resume
         if args.tf is not None:
-            simulation_kwargs.update({
-                "tf": args.tf,
-                "filename": p,
-            })
+            simulation_kwargs.update(
+                {
+                    "tf": args.tf,
+                    "filename": p,
+                }
+            )
             simulation_kwargs = {
                 k: simulation_kwargs[k]
                 for k in signature(simulation).parameters
